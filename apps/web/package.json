@@ -1,0 +1,43 @@
+{
+  "name": "@repo/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@better-auth/oauth-provider": "^1.6.5",
+    "@repo/integrations-core": "workspace:*",
+    "@repo/shared": "workspace:*",
+    "@repo/ui": "workspace:*",
+    "@tailwindcss/typography": "^0.5.19",
+    "@tanstack/react-query": "^5.65.0",
+    "@tanstack/react-router": "^1.97.3",
+    "better-auth": "1.6.5",
+    "lucide-react": "^1.8.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@repo/eslint-config": "workspace:*",
+    "@repo/typescript-config": "workspace:*",
+    "@tailwindcss/vite": "^4.0.0-beta.14",
+    "@tanstack/router-plugin": "^1.96.0",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.0.6",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.5",
+    "eslint": "^9.26.0",
+    "tailwindcss": "^4.0.0-beta.14",
+    "typescript": "^5.8.0",
+    "vite": "^6.0.6"
+  }
+}

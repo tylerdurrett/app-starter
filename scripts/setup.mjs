@@ -1,0 +1,284 @@
+#!/usr/bin/env node
+
+/**
+ * Port detection + project.config.json + .env generation.
+ *
+ * Usage:
+ *   node scripts/setup.mjs            # interactive — prompts in a TTY
+ *   node scripts/setup.mjs --ensure   # non-interactive — reuse or auto-pick
+ */
+
+import { createServer } from 'node:net';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createInterface } from 'node:readline';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(__dirname, '..');
+const configPath = resolve(repoRoot, 'project.config.json');
+const envPath = resolve(repoRoot, '.env');
+
+const SERVER_PORT_START = 5100;
+const SERVER_PORT_END = 5149;
+const DB_PORT_START = 5150;
+const DB_PORT_END = 5199;
+const WEB_PORT_START = 5200;
+const WEB_PORT_END = 5249;
+
+const ensureMode = process.argv.includes('--ensure');
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Resolve true if the port is free, false otherwise. */
+function isPortFree(port) {
+  return new Promise((res) => {
+    const srv = createServer();
+    srv.unref();
+    srv.on('error', () => srv.close(() => res(false)));
+    srv.listen(port, '127.0.0.1', () => {
+      srv.close(() => res(true));
+    });
+  });
+}
+
+/** Find the first free port in [start, end]. Returns null if none available. */
+async function findFreePort(start, end) {
+  for (let port = start; port <= end; port++) {
+    if (await isPortFree(port)) return port;
+  }
+  return null;
+}
+
+/** Read an existing project.config.json, or null if missing / invalid. */
+function readConfig() {
+  try {
+    const raw = readFileSync(configPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    // Return the parsed config with all available ports
+    return {
+      serverPort: parsed.serverPort ?? null,
+      dbPort: parsed.dbPort ?? null,
+      webPort: parsed.webPort ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Write project.config.json with the chosen ports. */
+function writeConfig(serverPort, dbPort, webPort) {
+  const data = { serverPort, dbPort, webPort };
+  writeFileSync(configPath, JSON.stringify(data, null, 2) + '\n');
+  console.log(`Wrote ${configPath}`);
+  console.log(`  serverPort: ${serverPort}`);
+  console.log(`  dbPort:     ${dbPort}`);
+  console.log(`  webPort:    ${webPort}`);
+}
+
+/** Read existing .env file and parse into key-value pairs */
+function readEnvFile() {
+  try {
+    const content = readFileSync(envPath, 'utf-8');
+    const env = {};
+    for (const line of content.split('\n')) {
+      if (line.trim() && !line.startsWith('#')) {
+        const [key, ...valueParts] = line.split('=');
+        if (key) {
+          env[key.trim()] = valueParts.join('=').trim();
+        }
+      }
+    }
+    return env;
+  } catch {
+    return {};
+  }
+}
+
+/** Generate a random secret for Better Auth */
+function generateAuthSecret() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let secret = '';
+  for (let i = 0; i < 32; i++) {
+    secret += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return secret;
+}
+
+/** Generate a random encryption key for credentials */
+function generateEncryptionKey() {
+  const bytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function isLocalDevUrl(value, path = '/') {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === 'http:' &&
+      (url.hostname === 'localhost' || url.hostname === '127.0.0.1') &&
+      (url.pathname === path || url.pathname === `${path}/`)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Upsert .env values - preserve existing, update/add generated ones */
+export function resolveManagedEnv(existing, { dbPort, webPort, serverPort }) {
+  const localAuthUrl = `http://localhost:${serverPort}`;
+  const localWebUrl = `http://localhost:${webPort}`;
+  const authUrl =
+    existing.BETTER_AUTH_URL && !isLocalDevUrl(existing.BETTER_AUTH_URL)
+      ? existing.BETTER_AUTH_URL.replace(/\/$/, '')
+      : localAuthUrl;
+  const webUrl =
+    existing.CORS_ORIGIN && !isLocalDevUrl(existing.CORS_ORIGIN)
+      ? existing.CORS_ORIGIN.replace(/\/$/, '')
+      : localWebUrl;
+  const viteServerUrl =
+    existing.VITE_SERVER_URL && !isLocalDevUrl(existing.VITE_SERVER_URL)
+      ? existing.VITE_SERVER_URL.replace(/\/$/, '')
+      : authUrl;
+  const mcpUrl =
+    existing.MCP_CANONICAL_URL && !isLocalDevUrl(existing.MCP_CANONICAL_URL, '/mcp')
+      ? existing.MCP_CANONICAL_URL.replace(/\/$/, '')
+      : `${authUrl}/mcp`;
+
+  return {
+    DB_PORT: String(dbPort),
+    DATABASE_URL: `postgresql://postgres:postgres@127.0.0.1:${dbPort}/postgres`,
+    // Preserve custom HTTPS origins used by Tailscale Serve or production-like
+    // local testing. Overwriting them during `pnpm go` breaks CORS/cookie auth.
+    CORS_ORIGIN: webUrl,
+    VITE_SERVER_URL: viteServerUrl,
+    BETTER_AUTH_URL: authUrl,
+    MCP_CANONICAL_URL: mcpUrl,
+    AUTH_REQUIRE_EMAIL_VERIFICATION: existing.AUTH_REQUIRE_EMAIL_VERIFICATION ?? 'false',
+  };
+}
+
+function writeEnvFile(dbPort, webPort, serverPort) {
+  const existing = readEnvFile();
+
+  // Generated values that we manage
+  const managed = resolveManagedEnv(existing, { dbPort, webPort, serverPort });
+
+  // Add BETTER_AUTH_SECRET if it doesn't exist
+  if (!existing.BETTER_AUTH_SECRET) {
+    managed.BETTER_AUTH_SECRET = generateAuthSecret();
+  }
+
+  // Add CREDENTIAL_ENCRYPTION_KEY if it doesn't exist
+  if (!existing.CREDENTIAL_ENCRYPTION_KEY) {
+    managed.CREDENTIAL_ENCRYPTION_KEY = generateEncryptionKey();
+    console.log('Generated CREDENTIAL_ENCRYPTION_KEY (stored in .env)');
+  }
+
+  // Merge with existing, managed values take precedence
+  const final = { ...existing, ...managed };
+
+  // Write back to file
+  const content =
+    Object.entries(final)
+      .map(([key, value]) => `${key}=${value}`)
+      .join('\n') + '\n';
+
+  writeFileSync(envPath, content);
+  console.log(`Updated ${envPath}`);
+}
+
+/** Prompt the user for a line of input. */
+function ask(question) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((res) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      res(answer.trim());
+    });
+  });
+}
+
+/** Prompt for a port, validate, and return the chosen value. */
+async function askPort(label, defaultPort) {
+  const answer = await ask(`${label} port [${defaultPort}]: `);
+  const chosen = answer === '' ? defaultPort : parseInt(answer, 10);
+  if (Number.isNaN(chosen) || chosen < 1 || chosen > 65535) {
+    console.error(`Invalid port: "${answer}"`);
+    process.exit(1);
+  }
+  return chosen;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+/** Find a free port in a range or exit with an error. */
+async function requireFreePort(start, end, label) {
+  const port = await findFreePort(start, end);
+  if (port === null) {
+    console.error(`No free ${label} port found in range ${start}–${end}.`);
+    process.exit(1);
+  }
+  return port;
+}
+
+async function main() {
+  const existing = readConfig();
+
+  // Non-interactive path: --ensure flag or piped stdin
+  if (ensureMode || !process.stdin.isTTY) {
+    if (existing && existing.serverPort && existing.dbPort && existing.webPort) {
+      console.log(
+        `project.config.json exists (server ${existing.serverPort}, db ${existing.dbPort}, web ${existing.webPort}) — reusing.`,
+      );
+      // Always regenerate .env to stay in sync
+      writeEnvFile(existing.dbPort, existing.webPort, existing.serverPort);
+      return;
+    }
+    const serverPort =
+      existing?.serverPort ?? (await requireFreePort(SERVER_PORT_START, SERVER_PORT_END, 'server'));
+    const dbPort =
+      existing?.dbPort ?? (await requireFreePort(DB_PORT_START, DB_PORT_END, 'database'));
+    const webPort =
+      existing?.webPort ?? (await requireFreePort(WEB_PORT_START, WEB_PORT_END, 'web'));
+    writeConfig(serverPort, dbPort, webPort);
+    writeEnvFile(dbPort, webPort, serverPort);
+    return;
+  }
+
+  // Interactive TTY flow
+  if (existing && existing.serverPort && existing.dbPort && existing.webPort) {
+    console.log(
+      `Current config: serverPort = ${existing.serverPort}, dbPort = ${existing.dbPort}, webPort = ${existing.webPort}`,
+    );
+  }
+
+  const defaultServerPort =
+    existing?.serverPort ?? (await requireFreePort(SERVER_PORT_START, SERVER_PORT_END, 'server'));
+  const chosenServer = await askPort('Server', defaultServerPort);
+
+  const defaultDbPort =
+    existing?.dbPort ?? (await requireFreePort(DB_PORT_START, DB_PORT_END, 'database'));
+  const chosenDb = await askPort('Database', defaultDbPort);
+
+  const defaultWebPort =
+    existing?.webPort ?? (await requireFreePort(WEB_PORT_START, WEB_PORT_END, 'web'));
+  const chosenWeb = await askPort('Web', defaultWebPort);
+
+  writeConfig(chosenServer, chosenDb, chosenWeb);
+  writeEnvFile(chosenDb, chosenWeb, chosenServer);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
