@@ -9,6 +9,7 @@
  */
 
 import { createServer } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -99,21 +100,14 @@ function readEnvFile() {
 
 /** Generate a random secret for Better Auth */
 function generateAuthSecret() {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let secret = '';
-  for (let i = 0; i < 32; i++) {
-    secret += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return secret;
+  // Cryptographically secure — equivalent to `openssl rand -base64 32`.
+  return randomBytes(32).toString('base64');
 }
 
 /** Generate a random encryption key for credentials */
 function generateEncryptionKey() {
-  const bytes = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
-    bytes[i] = Math.floor(Math.random() * 256);
-  }
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  // Cryptographically secure — equivalent to `openssl rand -hex 32`.
+  return randomBytes(32).toString('hex');
 }
 
 function isLocalDevUrl(value, path = '/') {
