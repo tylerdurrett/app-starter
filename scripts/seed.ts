@@ -3,6 +3,7 @@ import { config } from 'dotenv';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildServer } from '../apps/server/src/index.js';
+import { auth } from '../apps/server/src/auth.js';
 import type { FastifyInstance } from 'fastify';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -11,9 +12,15 @@ config({ path: resolve(__dirname, '..', '.env') });
 // Test user credentials
 const TEST_USER = {
   email: 'test@test.com',
-  password: 'password',
+  password: 'asdf',
   name: 'Test User',
 };
+
+// Better Auth correctly requires eight characters when creating an account.
+// Seed with a compliant temporary value, then install the intentionally weak
+// local-development password without weakening the application's auth policy.
+const BOOTSTRAP_PASSWORD = 'asdfasdf';
+const LEGACY_PASSWORD = 'password';
 
 /** Extract the session cookie from a set-cookie header. */
 function extractCookie(res: { headers: Record<string, string | string[] | undefined> }): string {
@@ -23,12 +30,12 @@ function extractCookie(res: { headers: Record<string, string | string[] | undefi
 }
 
 /** Sign in and return the session cookie, or null if the user doesn't exist. */
-async function signIn(app: FastifyInstance): Promise<string | null> {
+async function signIn(app: FastifyInstance, password = TEST_USER.password): Promise<string | null> {
   const res = await app.inject({
     method: 'POST',
     url: '/api/auth/sign-in/email',
     headers: { 'content-type': 'application/json' },
-    payload: { email: TEST_USER.email, password: TEST_USER.password },
+    payload: { email: TEST_USER.email, password },
   });
   if (res.statusCode === 200) return extractCookie(res);
   return null;
@@ -40,7 +47,7 @@ async function signUp(app: FastifyInstance): Promise<string> {
     method: 'POST',
     url: '/api/auth/sign-up/email',
     headers: { 'content-type': 'application/json' },
-    payload: TEST_USER,
+    payload: { ...TEST_USER, password: BOOTSTRAP_PASSWORD },
   });
 
   if (res.statusCode === 200) {
@@ -51,12 +58,32 @@ async function signUp(app: FastifyInstance): Promise<string> {
   const body = JSON.parse(res.body);
   if (res.statusCode === 422 && body.code === 'USER_ALREADY_EXISTS') {
     // Race condition: user was created between our sign-in check and sign-up
-    const cookie = await signIn(app);
+    const cookie = await signIn(app, BOOTSTRAP_PASSWORD);
     if (!cookie) throw new Error('User exists but sign-in failed');
     return cookie;
   }
 
   throw new Error(`Failed to create user: ${res.statusCode} - ${res.body}`);
+}
+
+/** Set the known local-only seed password while preserving the real eight-character policy. */
+async function setSeedPassword(): Promise<void> {
+  const context = await auth.$context;
+  const result = await context.internalAdapter.findUserByEmail(TEST_USER.email, {
+    includeAccounts: true,
+  });
+
+  if (!result) throw new Error(`Seed user ${TEST_USER.email} was not created`);
+
+  const credentialAccounts = result.accounts.filter((account) => account.providerId === 'credential');
+  if (credentialAccounts.length !== 1) {
+    throw new Error(
+      `Expected one credential account for ${TEST_USER.email}, found ${credentialAccounts.length}`,
+    );
+  }
+
+  const passwordHash = await context.password.hash(TEST_USER.password);
+  await context.internalAdapter.updatePassword(result.user.id, passwordHash);
 }
 
 /** Ensure the user has at least one workspace; create one if missing. */
@@ -178,10 +205,22 @@ async function seed() {
     await app.ready();
     console.log('✓ Server initialized');
 
-    // Sign in (existing user) or sign up (new user) — always get a session cookie
+    // Sign in (existing user) or sign up (new user) — always get a session cookie.
+    // Accept the old seed password once so existing local databases migrate cleanly.
     const existing = await signIn(app);
     if (existing) console.log(`✓ User ${TEST_USER.email} already exists (idempotent)`);
-    const cookie = existing ?? await signUp(app);
+
+    const legacy = existing ? null : await signIn(app, LEGACY_PASSWORD);
+    const bootstrap = existing || legacy ? null : await signIn(app, BOOTSTRAP_PASSWORD);
+    let cookie = existing ?? legacy ?? bootstrap ?? await signUp(app);
+
+    if (!existing) {
+      await setSeedPassword();
+      const verified = await signIn(app);
+      if (!verified) throw new Error(`Failed to verify the seed password for ${TEST_USER.email}`);
+      cookie = verified;
+      console.log(`✓ Set seed password for ${TEST_USER.email}`);
+    }
 
     // Ensure the user has at least one workspace
     const workspace = await ensureWorkspace(app, cookie);

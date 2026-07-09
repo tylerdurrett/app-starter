@@ -187,6 +187,22 @@ describe('Auth endpoints', () => {
     expect(body.code).toBe('PASSWORD_TOO_SHORT');
   });
 
+  it('should reject the intentionally weak local seed password for regular sign-up', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/auth/sign-up/email',
+      headers: { 'content-type': 'application/json' },
+      payload: {
+        email: `weak-password-${testEmail}`,
+        password: 'asdf',
+        name: testName,
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).code).toBe('PASSWORD_TOO_SHORT');
+  });
+
   it('should return error for invalid credentials on sign-in', async () => {
     // Register a user
     const invalidCredEmail = `invalid-${testEmail}`;
