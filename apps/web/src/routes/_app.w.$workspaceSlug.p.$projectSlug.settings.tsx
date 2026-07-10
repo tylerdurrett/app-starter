@@ -34,14 +34,16 @@ function ProjectSettingsPage() {
         <h1 className="text-3xl font-bold">Settings</h1>
 
         <GeneralSection
+          workspaceSlug={project.workspaceSlug}
           projectName={project.name}
           projectSlug={project.slug}
           role={role}
         />
-        <MembersSection slug={project.slug} role={role} />
-        <InvitesSection slug={project.slug} role={role} />
+        <MembersSection workspaceSlug={project.workspaceSlug} slug={project.slug} role={role} />
+        <InvitesSection workspaceSlug={project.workspaceSlug} slug={project.slug} role={role} />
         {canProject(role, 'project:delete') && (
           <DangerZoneSection
+            workspaceSlug={project.workspaceSlug}
             projectName={project.name}
             projectSlug={project.slug}
           />
@@ -52,10 +54,12 @@ function ProjectSettingsPage() {
 }
 
 function GeneralSection({
+  workspaceSlug,
   projectName,
   projectSlug,
   role,
 }: {
+  workspaceSlug: string;
   projectName: string;
   projectSlug: string;
   role: ProjectRole;
@@ -77,7 +81,7 @@ function GeneralSection({
     setIsLoading(true);
 
     try {
-      await updateProject(projectSlug, { name: trimmed });
+      await updateProject(workspaceSlug, projectSlug, { name: trimmed });
       setSuccess('Name updated');
       setIsEditingName(false);
       await router.invalidate();
@@ -159,7 +163,7 @@ function GeneralSection({
   );
 }
 
-function MembersSection({ slug, role }: { slug: string; role: ProjectRole }) {
+function MembersSection({ workspaceSlug, slug, role }: { workspaceSlug: string; slug: string; role: ProjectRole }) {
   const session = useSession();
   const currentUserId = session.data?.user?.id;
 
@@ -172,13 +176,13 @@ function MembersSection({ slug, role }: { slug: string; role: ProjectRole }) {
     setLoading(true);
     setError('');
     try {
-      setMembers(await listProjectMembers(slug));
+      setMembers(await listProjectMembers(workspaceSlug, slug));
     } catch {
       setError('Failed to load members');
     } finally {
       setLoading(false);
     }
-  }, [slug]);
+  }, [workspaceSlug, slug]);
 
   useEffect(() => {
     fetchMembers();
@@ -187,7 +191,7 @@ function MembersSection({ slug, role }: { slug: string; role: ProjectRole }) {
   const handleRemove = async (userId: string) => {
     setRemovingId(userId);
     try {
-      await removeProjectMember(slug, userId);
+      await removeProjectMember(workspaceSlug, slug, userId);
       setMembers((prev) => prev.filter((m) => m.userId !== userId));
     } catch {
       setError('Failed to remove member');
@@ -248,7 +252,7 @@ function MembersSection({ slug, role }: { slug: string; role: ProjectRole }) {
   );
 }
 
-function InvitesSection({ slug, role }: { slug: string; role: ProjectRole }) {
+function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; slug: string; role: ProjectRole }) {
   const [invites, setInvites] = useState<ProjectInvite[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -270,13 +274,13 @@ function InvitesSection({ slug, role }: { slug: string; role: ProjectRole }) {
     setLoading(true);
     setError('');
     try {
-      setInvites(await listProjectInvites(slug));
+      setInvites(await listProjectInvites(workspaceSlug, slug));
     } catch {
       setError('Failed to load invites');
     } finally {
       setLoading(false);
     }
-  }, [slug]);
+  }, [workspaceSlug, slug]);
 
   useEffect(() => {
     fetchInvites();
@@ -293,7 +297,7 @@ function InvitesSection({ slug, role }: { slug: string; role: ProjectRole }) {
     setIsInviting(true);
 
     try {
-      const result = await createProjectInvite(slug, trimmed, selectedRole);
+      const result = await createProjectInvite(workspaceSlug, slug, trimmed, selectedRole);
       setInviteUrl(result.inviteUrl);
       setEmail('');
       setInvites((prev) => [result.invite, ...prev]);
@@ -318,7 +322,7 @@ function InvitesSection({ slug, role }: { slug: string; role: ProjectRole }) {
   const handleRevoke = async (inviteId: string) => {
     setRevokingId(inviteId);
     try {
-      await revokeProjectInvite(slug, inviteId);
+      await revokeProjectInvite(workspaceSlug, slug, inviteId);
       setInvites((prev) => prev.filter((inv) => inv.id !== inviteId));
     } catch {
       setError('Failed to revoke invite');
@@ -438,9 +442,11 @@ function InvitesSection({ slug, role }: { slug: string; role: ProjectRole }) {
 }
 
 function DangerZoneSection({
+  workspaceSlug,
   projectName,
   projectSlug,
 }: {
+  workspaceSlug: string;
   projectName: string;
   projectSlug: string;
 }) {
@@ -460,7 +466,7 @@ function DangerZoneSection({
     setIsDeleting(true);
 
     try {
-      await deleteProject(projectSlug, confirmation);
+      await deleteProject(workspaceSlug, projectSlug, confirmation);
       // Resolve next destination after deletion
       const target = await resolveProject();
       await navigate(target);
