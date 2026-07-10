@@ -44,25 +44,64 @@ export async function createProject({
   workspaceId: string;
   ownerUserId: string;
 }) {
-  let baseSlug = slugify(name);
-  // Fallback for names that produce an empty slug (e.g. all special chars)
-  if (!baseSlug) baseSlug = `project-${randomUUID().slice(0, 8)}`;
+  // Retry to close the check-then-insert race: ensureUniqueSlug runs in a
+  // SELECT separate from the INSERT, so two concurrent creations in the same
+  // workspace can compute the same suffix and collide on the
+  // (workspace_id, slug) unique constraint. On that specific violation we
+  // recompute the slug (a fresh SELECT now sees the winner's row) and retry.
+  const MAX_ATTEMPTS = 5;
+  let lastError: unknown;
 
-  const slug = await ensureUniqueSlug(baseSlug, workspaceId);
-  const id = randomUUID();
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    let baseSlug = slugify(name);
+    // Fallback for names that produce an empty slug (e.g. all special chars)
+    if (!baseSlug) baseSlug = `project-${randomUUID().slice(0, 8)}`;
 
-  const [created] = await db.transaction(async (tx) => {
-    const rows = await tx.insert(projects).values({ id, name, slug, workspaceId }).returning();
-    await tx.insert(projectMemberships).values({
-      id: randomUUID(),
-      projectId: id,
-      userId: ownerUserId,
-      role: 'owner',
-    });
-    return rows;
-  });
+    const slug = await ensureUniqueSlug(baseSlug, workspaceId);
+    const id = randomUUID();
 
-  return created;
+    try {
+      const [created] = await db.transaction(async (tx) => {
+        const rows = await tx.insert(projects).values({ id, name, slug, workspaceId }).returning();
+        await tx.insert(projectMemberships).values({
+          id: randomUUID(),
+          projectId: id,
+          userId: ownerUserId,
+          role: 'owner',
+        });
+        return rows;
+      });
+
+      return created;
+    } catch (err) {
+      if (isSlugUniqueViolation(err)) {
+        lastError = err;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastError;
+}
+
+/**
+ * True only for the projects (workspace_id, slug) unique violation — the race
+ * we retry. Any other error (including the projectMemberships insert) must not
+ * be swallowed. Drizzle wraps the driver error in a DrizzleQueryError, so the
+ * postgres.js fields (code, constraint_name) live on the `cause` chain, not the
+ * top-level error.
+ */
+function isSlugUniqueViolation(err: unknown): boolean {
+  let current: unknown = err;
+  while (typeof current === 'object' && current !== null) {
+    const e = current as { code?: unknown; constraint_name?: unknown; cause?: unknown };
+    if (e.code === '23505' && e.constraint_name === 'projects_workspace_id_slug_unique') {
+      return true;
+    }
+    current = e.cause;
+  }
+  return false;
 }
 
 export async function listProjectsForUser(userId: string) {
