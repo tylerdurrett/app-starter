@@ -1,5 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// active-workspace imports getLastActiveProject from ./projects, which pulls in
+// ./api and its top-level VITE_SERVER_URL check. Mock ./api so the module loads
+// under the node test env (same pattern as projects.test.ts). These tests cover
+// the pure comparator and storage only — no network is exercised.
+vi.mock('./api', () => ({ apiFetch: vi.fn() }));
+
 import {
+  activeContextAgreesWithServer,
+  clearActiveContext,
   parseProjectSlug,
   parseWorkspaceSlug,
   readActiveContext,
@@ -7,6 +16,7 @@ import {
   writeActiveContext,
   type StoredActiveContext,
 } from './active-workspace';
+import type { Project } from './projects';
 
 describe('parseWorkspaceSlug', () => {
   it('resolves the workspace slug from a nested workspace path', () => {
@@ -132,6 +142,58 @@ describe('resolveActiveContext', () => {
   });
 });
 
+describe('activeContextAgreesWithServer', () => {
+  const cached: StoredActiveContext = {
+    workspaceSlug: 'workspace-A',
+    projectSlug: 'reports',
+    projectId: 'proj-a1',
+  };
+
+  function serverProject(overrides: Partial<Project> = {}): Project {
+    return {
+      id: 'proj-a1',
+      name: 'Reports',
+      slug: 'reports',
+      workspaceId: 'ws-a',
+      workspaceSlug: 'workspace-A',
+      workspaceName: 'Workspace A',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('flags the hint stale when the server returns null (deleted / access revoked)', () => {
+    // The revoked-access acceptance criterion: server authority says no
+    // last-active project, so the cached hint must be cleared, not painted.
+    expect(activeContextAgreesWithServer(cached, null)).toBe(false);
+  });
+
+  it('keeps the hint when the server id matches the cached projectId', () => {
+    // A moved/renamed project keeps its id — id match wins even if slugs shift.
+    expect(
+      activeContextAgreesWithServer(cached, serverProject({ slug: 'renamed', workspaceSlug: 'workspace-A' })),
+    ).toBe(true);
+  });
+
+  it('flags the hint stale when the server id disagrees with the cached projectId', () => {
+    expect(activeContextAgreesWithServer(cached, serverProject({ id: 'proj-other' }))).toBe(false);
+  });
+
+  it('compares the (workspaceSlug, projectSlug) pair when the cache carries no id', () => {
+    const noId: StoredActiveContext = { workspaceSlug: 'workspace-A', projectSlug: 'reports', projectId: null };
+    expect(activeContextAgreesWithServer(noId, serverProject({ id: 'anything' }))).toBe(true);
+  });
+
+  it('flags the hint stale when the pair disagrees and the cache carries no id', () => {
+    const noId: StoredActiveContext = { workspaceSlug: 'workspace-A', projectSlug: 'reports', projectId: null };
+    // Same project slug but a different workspace — never treat it as a match
+    // (ADR-0009: slugs are per-workspace, so this is a different project).
+    expect(activeContextAgreesWithServer(noId, serverProject({ workspaceSlug: 'workspace-B' }))).toBe(false);
+    expect(activeContextAgreesWithServer(noId, serverProject({ slug: 'dashboards' }))).toBe(false);
+  });
+});
+
 describe('active-context storage round-trip', () => {
   const originalWindow = (globalThis as { window?: unknown }).window;
 
@@ -172,6 +234,19 @@ describe('active-context storage round-trip', () => {
   });
 
   it('returns null for absent storage', () => {
+    expect(readActiveContext()).toBeNull();
+  });
+
+  it('clearActiveContext removes the stored unit so a revoked hint stops painting', () => {
+    const unit: StoredActiveContext = {
+      workspaceSlug: 'workspace-A',
+      projectSlug: 'reports',
+      projectId: 'proj-a1',
+    };
+    writeActiveContext(unit);
+    expect(readActiveContext()).toEqual(unit);
+
+    clearActiveContext();
     expect(readActiveContext()).toBeNull();
   });
 
