@@ -9,7 +9,7 @@ import {
 } from '../lib/workspaces';
 import { canWorkspace } from '../lib/permissions';
 import { signOut } from '../lib/auth-client';
-import { useActiveWorkspaceSlug } from '../lib/active-workspace';
+import { useActiveContext } from '../lib/active-workspace';
 import {
   Selector,
   SelectorDivider,
@@ -25,7 +25,7 @@ export function WorkspaceSwitcher() {
   // keeps its active workspace on workspace-less routes like /account.
   // `urlProjectWorkspaceName` feeds the project-only-access pill and is only
   // non-null when we're actually on /p/:slug (not when falling back to storage).
-  const { slug: activeSlug, fromUrl, urlProjectWorkspaceName: contextualName } = useActiveWorkspaceSlug();
+  const { workspaceSlug: activeSlug, fromUrl, urlProjectWorkspaceName: contextualName } = useActiveContext();
 
   const [workspaces, setWorkspaces] = useState<WorkspaceWithRole[]>([]);
   const [loading, setLoading] = useState(true);

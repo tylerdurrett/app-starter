@@ -6,7 +6,7 @@ import { NavTile } from './nav-tile';
 import { WorkspaceSwitcher } from './workspace-switcher';
 import { ProjectSwitcher } from './project-switcher';
 import { listWorkspaces } from '../lib/workspaces';
-import { useActiveWorkspaceSlug, useActiveProjectSlug } from '../lib/active-workspace';
+import { useActiveContext } from '../lib/active-workspace';
 import { type WorkspaceRole } from '../lib/permissions';
 
 type ActiveWorkspace = { slug: string; role: WorkspaceRole };
@@ -16,10 +16,16 @@ export function NavRail() {
   const currentPath = router.location.pathname;
 
   // Active workspace / project derivation (URL → localStorage fallback) lives
-  // in shared hooks so the nav keeps its icons visible on workspace-less
+  // in one shared hook so the nav keeps its icons visible on workspace-less
   // routes like /account (where neither /w/:slug nor /p/:slug are in the URL).
-  const { slug: activeWorkspaceSlug, fromUrl } = useActiveWorkspaceSlug();
-  const { slug: activeProjectSlug } = useActiveProjectSlug();
+  // The project slug is delivered as a coherent unit paired with the workspace
+  // it belongs to (projectWorkspaceSlug) — never crossed with the URL workspace.
+  const {
+    workspaceSlug: activeWorkspaceSlug,
+    fromUrl,
+    projectWorkspaceSlug,
+    projectSlug: activeProjectSlug,
+  } = useActiveContext();
 
   // Primary source: the workspace route loader. On any /w/$slug/** URL this
   // gives us { slug, role } synchronously, so the shell never flickers waiting
@@ -63,6 +69,17 @@ export function NavRail() {
 
   const activeWorkspace = loaderActive ?? fallbackWorkspace;
 
+  // Only highlight a project in the switcher when it actually belongs to the
+  // workspace currently on display — otherwise a project remembered from
+  // another workspace would light up the wrong row.
+  const switcherProjectSlug =
+    activeWorkspace && projectWorkspaceSlug === activeWorkspace.slug ? activeProjectSlug : null;
+
+  // The Dashboard link is built from the coherent unit's OWN workspace+project,
+  // never activeWorkspace.slug × a cached project — that pairing would resolve
+  // to the wrong project (post-ADR-0009 slugs are unique only per-workspace).
+  const showDashboard = Boolean(activeWorkspace && projectWorkspaceSlug && activeProjectSlug);
+
   return (
     <TooltipProvider delay={150}>
       <nav className="w-20 bg-card border-r flex flex-col">
@@ -71,21 +88,21 @@ export function NavRail() {
             <ProjectSwitcher
               workspaceSlug={activeWorkspace.slug}
               workspaceRole={activeWorkspace.role}
-              activeProjectSlug={activeProjectSlug}
+              activeProjectSlug={switcherProjectSlug}
             />
             <div className="border-b" />
           </>
         )}
 
-        {activeProjectSlug && activeWorkspace && (
+        {showDashboard && projectWorkspaceSlug && activeProjectSlug && (
           <>
             {/* Dashboard uses exact-match — it's the /p/:slug index route, so nested pages shouldn't light it up. */}
             <NavTile
               label="Dashboard"
               icon={LayoutDashboard}
               to="/w/$workspaceSlug/p/$projectSlug"
-              params={{ workspaceSlug: activeWorkspace.slug, projectSlug: activeProjectSlug }}
-              active={currentPath === `/w/${activeWorkspace.slug}/p/${activeProjectSlug}`}
+              params={{ workspaceSlug: projectWorkspaceSlug, projectSlug: activeProjectSlug }}
+              active={currentPath === `/w/${projectWorkspaceSlug}/p/${activeProjectSlug}`}
             />
           </>
         )}
