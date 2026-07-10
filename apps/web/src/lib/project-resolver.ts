@@ -45,8 +45,3 @@ export async function resolveProject(): Promise<ProjectRedirectTarget> {
 
   return { to: '/onboarding/create-workspace' };
 }
-
-// Keep resolveWorkspace for backward compatibility (will be removed later)
-export async function resolveWorkspace(): Promise<ProjectRedirectTarget> {
-  return resolveProject();
-}
