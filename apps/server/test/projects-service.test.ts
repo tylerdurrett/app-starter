@@ -469,6 +469,90 @@ describe('removeMember', () => {
   });
 });
 
+describe('workspace-scoped slug threading through service wrappers', () => {
+  it('getProjectBySlug resolves each duplicate-slug project under its own workspace', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Composite Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Composite Ws B', aliceId);
+    const projA = await createAndTrack('Svc Shared Slug', aliceId, { wsId: wsA.id });
+    const projB = await createAndTrack('Svc Shared Slug', aliceId, { wsId: wsB.id });
+    expect(projA.slug).toBe(projB.slug);
+
+    const resA = await getProjectBySlug(projA.slug, aliceId, wsA.slug);
+    const resB = await getProjectBySlug(projB.slug, aliceId, wsB.slug);
+
+    expect(resA.project.id).toBe(projA.id);
+    expect(resB.project.id).toBe(projB.id);
+  });
+
+  it('getProjectBySlug returns NOT_FOUND when the slug lives only in another workspace', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Wrong Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Wrong Ws B', aliceId);
+    const proj = await createAndTrack('Svc Only In A', aliceId, { wsId: wsA.id });
+
+    await expect(getProjectBySlug(proj.slug, aliceId, wsB.slug)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+  });
+
+  it('updateProject targets the project in the given workspace', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Update Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Update Ws B', aliceId);
+    const projA = await createAndTrack('Svc Update Shared', aliceId, { wsId: wsA.id });
+    const projB = await createAndTrack('Svc Update Shared', aliceId, { wsId: wsB.id });
+
+    const updated = await updateProject(projB.slug, aliceId, { name: 'Renamed In B' }, wsB.slug);
+    expect(updated.id).toBe(projB.id);
+    expect(updated.name).toBe('Renamed In B');
+
+    const [aStill] = await db.select().from(projects).where(eq(projects.id, projA.id));
+    expect(aStill.name).toBe('Svc Update Shared');
+  });
+
+  it('deleteProject deletes the project in the given workspace only', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Delete Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Delete Ws B', aliceId);
+    const projA = await createAndTrack('Svc Delete Shared', aliceId, { wsId: wsA.id });
+    const projB = await createAndTrack('Svc Delete Shared', aliceId, { wsId: wsB.id });
+
+    await deleteProject(projB.slug, aliceId, { confirmation: `Delete ${projB.name}` }, wsB.slug);
+
+    const [bGone] = await db.select().from(projects).where(eq(projects.id, projB.id));
+    const [aStill] = await db.select().from(projects).where(eq(projects.id, projA.id));
+    expect(bGone).toBeUndefined();
+    expect(aStill.id).toBe(projA.id);
+  });
+
+  it('listMembers resolves the project in the given workspace', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Members Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Members Ws B', aliceId);
+    const projA = await createAndTrack('Svc Members Shared', aliceId, { wsId: wsA.id });
+    const projB = await createAndTrack('Svc Members Shared', aliceId, { wsId: wsB.id });
+    await addProjectMember(projB.id, bobId, 'member');
+
+    const membersB = await listMembers(projB.slug, aliceId, wsB.slug);
+    const membersA = await listMembers(projA.slug, aliceId, wsA.slug);
+
+    expect(membersB.map((m) => m.userId).sort()).toEqual([aliceId, bobId].sort());
+    expect(membersA.map((m) => m.userId)).toEqual([aliceId]);
+  });
+
+  it('removeMember resolves the project in the given workspace', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Remove Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Remove Ws B', aliceId);
+    const projA = await createAndTrack('Svc Remove Shared', aliceId, { wsId: wsA.id });
+    const projB = await createAndTrack('Svc Remove Shared', aliceId, { wsId: wsB.id });
+    await addProjectMember(projA.id, bobId, 'member');
+    await addProjectMember(projB.id, bobId, 'member');
+
+    await removeMember(projB.slug, aliceId, bobId, wsB.slug);
+
+    const membersB = await listMembers(projB.slug, aliceId, wsB.slug);
+    const membersA = await listMembers(projA.slug, aliceId, wsA.slug);
+    expect(membersB.map((m) => m.userId)).toEqual([aliceId]);
+    expect(membersA.map((m) => m.userId).sort()).toEqual([aliceId, bobId].sort());
+  });
+});
+
 describe('last active project', () => {
   it('setLastActiveProject updates the user row', async () => {
     const proj = await createAndTrack('Last Active Set', aliceId);
