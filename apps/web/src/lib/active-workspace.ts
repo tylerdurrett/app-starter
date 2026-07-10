@@ -4,7 +4,7 @@ import { useRouterState, useMatch } from '@tanstack/react-router';
 const WORKSPACE_STORAGE_KEY = 'lastActiveWorkspaceSlug';
 const PROJECT_STORAGE_KEY = 'lastActiveProjectSlug';
 const WORKSPACE_PATH_RE = /^\/w\/([^/]+)/;
-const PROJECT_PATH_RE = /^\/p\/([^/]+)/;
+const PROJECT_PATH_RE = /^\/w\/[^/]+\/p\/([^/]+)/;
 
 function safeRead(key: string): string | null {
   try {
