@@ -3,13 +3,7 @@ import '../src/config.js';
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildServer } from '../src/index.js';
-import {
-  db,
-  workspaces,
-  workspaceMemberships,
-  projects,
-  projectMemberships,
-} from '@repo/db';
+import { db, workspaces, workspaceMemberships, projects, projectMemberships } from '@repo/db';
 import { inArray } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 
@@ -93,10 +87,16 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (createdProjectIds.length > 0) {
-    await db.delete(projects).where(inArray(projects.id, createdProjectIds)).catch(() => {});
+    await db
+      .delete(projects)
+      .where(inArray(projects.id, createdProjectIds))
+      .catch(() => {});
   }
   if (createdWorkspaceIds.length > 0) {
-    await db.delete(workspaces).where(inArray(workspaces.id, createdWorkspaceIds)).catch(() => {});
+    await db
+      .delete(workspaces)
+      .where(inArray(workspaces.id, createdWorkspaceIds))
+      .catch(() => {});
   }
   await app.close();
 });
@@ -160,14 +160,25 @@ describe('resolveProjectWithOverride', () => {
     expect(result.viaWorkspaceOverride).toBe(true);
   });
 
-  it('workspace member without project membership gets NOT_FOUND (no override)', async () => {
-    const ws = await createWs('WsMem No Override Ws', wsOwnerId);
+  it('workspace member without project membership gets synthetic member read access', async () => {
+    const ws = await createWs('WsMem Read Access Ws', wsOwnerId);
     await addWorkspaceMember(ws.id, wsMemberId, 'member');
-    const proj = await createProj('WsMem No Override Proj', ws.id, ownerId);
+    const proj = await createProj('WsMem Read Access Proj', ws.id, ownerId);
 
-    await expect(resolveProjectWithOverride(proj.slug, wsMemberId)).rejects.toMatchObject({
-      code: 'NOT_FOUND',
-    });
+    const result = await resolveProjectWithOverride(proj.slug, wsMemberId, 'project:read');
+
+    expect(result.role).toBe('member');
+    expect(result.viaWorkspaceOverride).toBe(true);
+  });
+
+  it('workspace member without project membership cannot edit the project', async () => {
+    const ws = await createWs('WsMem Edit Access Ws', wsOwnerId);
+    await addWorkspaceMember(ws.id, wsMemberId, 'member');
+    const proj = await createProj('WsMem Edit Access Proj', ws.id, ownerId);
+
+    await expect(
+      resolveProjectWithOverride(proj.slug, wsMemberId, 'project:edit'),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
   it('outsider (no workspace or project access) gets NOT_FOUND', async () => {

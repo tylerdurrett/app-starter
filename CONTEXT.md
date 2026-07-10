@@ -21,7 +21,7 @@ A user's direct role-bearing attachment to one workspace or one project; workspa
 One of `owner`, `manager`, `member` — the same three-role vocabulary at both tenancy levels, each level with its own permission matrix.
 
 **Workspace override**:
-The rule that a workspace `owner` or `manager` acts with a synthetic project `owner` role on every project in the workspace, without a project membership record.
+The rule that every workspace membership grants access to every project in that workspace without a project membership record: a workspace `owner` or `manager` acts with a synthetic project `owner` role, while a workspace `member` acts with a read-only synthetic project `member` role. A direct project membership takes precedence.
 
 **Invite**:
 A pending, emailed offer of membership at one level; distinct from a membership until accepted.
@@ -31,13 +31,13 @@ A pending, emailed offer of membership at one level; distinct from a membership 
 - A **Workspace** contains many **Projects**; a **Project** belongs to exactly one **Workspace**
 - A **Project**'s slug is unique within its **Workspace**, not globally; workspace slugs are globally unique (decided in ADR-0009; code catches up via issue #14)
 - A user holds at most one **Membership** per workspace and per project
-- A workspace **Membership** with role `owner`/`manager` implies the **Workspace override** on all contained projects
+- Every workspace **Membership** implies the **Workspace override** on all contained projects: `owner`/`manager` receive synthetic project `owner` access, while `member` receives read-only synthetic project `member` access
 - Deleting a **Workspace** cascades to its **Projects** and their memberships
 
 ## Example dialogue
 
 > **Dev:** "This user joined the **Workspace** — which **Projects** can they see?"
-> **Domain expert:** "If their workspace **Role** is `owner` or `manager`, all of them via the **Workspace override**. Otherwise only projects where they hold a direct **Membership**."
+> **Domain expert:** "All of them via the **Workspace override**. A workspace `owner` or `manager` gets synthetic project `owner` access; a workspace `member` gets read-only synthetic project `member` access. Any direct project **Membership** takes precedence."
 
 ## Flagged ambiguities
 

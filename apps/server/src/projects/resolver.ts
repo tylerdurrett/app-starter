@@ -4,26 +4,23 @@ import { ServiceError } from './service.js';
 import { can, type ProjectRole, type ProjectPermission } from './permissions.js';
 
 /**
- * Resolves project access with workspace admin override.
+ * Resolves project access with workspace access inherited by every project.
  *
  * 1. Direct project membership takes precedence
  * 2. Workspace owner/manager gets synthetic owner role on all projects
- * 3. Workspace member with no project access gets NOT_FOUND
+ * 3. Workspace member gets synthetic member role on all projects
  */
 export async function resolveProjectWithOverride(
   projectSlug: string,
   actorUserId: string,
-  requiredPermission?: ProjectPermission
+  requiredPermission?: ProjectPermission,
 ): Promise<{
   project: typeof projects.$inferSelect;
   role: ProjectRole;
   viaWorkspaceOverride?: boolean;
 }> {
   // First, get the project
-  const [project] = await db
-    .select()
-    .from(projects)
-    .where(eq(projects.slug, projectSlug));
+  const [project] = await db.select().from(projects).where(eq(projects.slug, projectSlug));
 
   if (!project) {
     throw new ServiceError('NOT_FOUND', 'Project not found');
@@ -34,10 +31,7 @@ export async function resolveProjectWithOverride(
     .select({ role: projectMemberships.role })
     .from(projectMemberships)
     .where(
-      and(
-        eq(projectMemberships.projectId, project.id),
-        eq(projectMemberships.userId, actorUserId)
-      )
+      and(eq(projectMemberships.projectId, project.id), eq(projectMemberships.userId, actorUserId)),
     );
 
   if (projectMember) {
@@ -50,30 +44,28 @@ export async function resolveProjectWithOverride(
     return { project, role };
   }
 
-  // Check for workspace admin override
+  // Check for workspace access inherited by the project
   const [workspaceMember] = await db
     .select({ role: workspaceMemberships.role })
     .from(workspaceMemberships)
     .where(
       and(
         eq(workspaceMemberships.workspaceId, project.workspaceId),
-        eq(workspaceMemberships.userId, actorUserId)
-      )
+        eq(workspaceMemberships.userId, actorUserId),
+      ),
     );
 
   if (workspaceMember) {
     const workspaceRole = workspaceMember.role as 'owner' | 'manager' | 'member';
 
-    // Workspace owner or manager gets synthetic owner role on projects
-    if (workspaceRole === 'owner' || workspaceRole === 'manager') {
-      const role: ProjectRole = 'owner';
+    const role: ProjectRole =
+      workspaceRole === 'owner' || workspaceRole === 'manager' ? 'owner' : 'member';
 
-      if (requiredPermission && !can(role, requiredPermission)) {
-        throw new ServiceError('FORBIDDEN', `Missing permission: ${requiredPermission}`);
-      }
-
-      return { project, role, viaWorkspaceOverride: true };
+    if (requiredPermission && !can(role, requiredPermission)) {
+      throw new ServiceError('FORBIDDEN', `Missing permission: ${requiredPermission}`);
     }
+
+    return { project, role, viaWorkspaceOverride: true };
   }
 
   // No access

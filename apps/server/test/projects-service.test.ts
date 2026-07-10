@@ -168,14 +168,51 @@ describe('createProject', () => {
 });
 
 describe('listProjectsForUser', () => {
-  it('returns only projects the user is a member of', async () => {
-    const proj = await createAndTrack('Alice Only Proj', aliceId);
+  it('includes workspace-visible projects with the existing response shape', async () => {
+    const workspace = await createAndTrackWorkspace('User Project List Workspace', aliceId);
+    await addWorkspaceMember(workspace.id, bobId, 'member');
+    const project = await createAndTrack('Workspace Visible User Project', aliceId, {
+      wsId: workspace.id,
+    });
 
-    const aliceList = await listProjectsForUser(aliceId);
+    const bobList = await listProjectsForUser(bobId);
+    const listedProject = bobList.find(({ id }) => id === project.id);
+
+    expect(listedProject).toEqual({
+      id: project.id,
+      name: project.name,
+      slug: project.slug,
+      workspaceId: workspace.id,
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+      role: 'member',
+    });
+  });
+
+  it('orders workspace-visible projects by project creation time', async () => {
+    const firstWorkspace = await createAndTrackWorkspace('First Ordered Workspace', aliceId);
+    const secondWorkspace = await createAndTrackWorkspace('Second Ordered Workspace', aliceId);
+    await addWorkspaceMember(firstWorkspace.id, bobId, 'member');
+    await addWorkspaceMember(secondWorkspace.id, bobId, 'member');
+
+    const olderProject = await createAndTrack('Older Ordered Project', aliceId, {
+      wsId: secondWorkspace.id,
+    });
+    const newerProject = await createAndTrack('Newer Ordered Project', aliceId, {
+      wsId: firstWorkspace.id,
+    });
+    await db
+      .update(projects)
+      .set({ createdAt: new Date('2000-01-01T00:00:00.000Z') })
+      .where(eq(projects.id, olderProject.id));
+    await db
+      .update(projects)
+      .set({ createdAt: new Date('2001-01-01T00:00:00.000Z') })
+      .where(eq(projects.id, newerProject.id));
+
     const bobList = await listProjectsForUser(bobId);
 
-    expect(aliceList.some((p) => p.id === proj.id)).toBe(true);
-    expect(bobList.some((p) => p.id === proj.id)).toBe(false);
+    expect(bobList.slice(0, 2).map(({ id }) => id)).toEqual([olderProject.id, newerProject.id]);
   });
 });
 
@@ -205,24 +242,38 @@ describe('listAccessibleProjectsForUser', () => {
     );
   });
 
-  it('includes projects visible through workspace owner or manager access', async () => {
-    const workspace = await createAndTrackWorkspace('Workspace Override List', aliceId);
-    await addWorkspaceMember(workspace.id, bobId, 'manager');
-    const project = await createAndTrack('Override Visible Project', aliceId, {
-      wsId: workspace.id,
-    });
+  it.each([
+    ['owner', 'owner', 'workspace_admin'],
+    ['manager', 'owner', 'workspace_admin'],
+    ['member', 'member', 'workspace_member'],
+  ] as const)(
+    'includes projects visible to a workspace %s with role %s and access %s',
+    async (workspaceRole, projectRole, access) => {
+      const workspace = await createAndTrackWorkspace(
+        `Workspace ${workspaceRole} List`,
+        workspaceRole === 'owner' ? bobId : aliceId,
+      );
+      if (workspaceRole !== 'owner') {
+        await addWorkspaceMember(workspace.id, bobId, workspaceRole);
+      }
+      const project = await createAndTrack(`${workspaceRole} Visible Project`, aliceId, {
+        wsId: workspace.id,
+      });
 
-    const result = await listAccessibleProjectsForUser(bobId, { workspaceSlug: workspace.slug });
+      const result = await listAccessibleProjectsForUser(bobId, {
+        workspaceSlug: workspace.slug,
+      });
 
-    expect(result).toEqual([
-      expect.objectContaining({
-        id: project.id,
-        role: 'owner',
-        access: 'workspace_admin',
-        workspace: expect.objectContaining({ slug: workspace.slug }),
-      }),
-    ]);
-  });
+      expect(result).toEqual([
+        expect.objectContaining({
+          id: project.id,
+          role: projectRole,
+          access,
+          workspace: expect.objectContaining({ slug: workspace.slug }),
+        }),
+      ]);
+    },
+  );
 
   it('keeps direct project role when workspace admin access also applies', async () => {
     const workspace = await createAndTrackWorkspace('Direct Role Wins Workspace', aliceId);
@@ -241,18 +292,6 @@ describe('listAccessibleProjectsForUser', () => {
         access: 'project_membership',
       }),
     ]);
-  });
-
-  it('does not include projects for workspace members without project membership', async () => {
-    const workspace = await createAndTrackWorkspace('Workspace Member Hidden Projects', aliceId);
-    await addWorkspaceMember(workspace.id, bobId, 'member');
-    const project = await createAndTrack('Hidden From Workspace Member', aliceId, {
-      wsId: workspace.id,
-    });
-
-    const result = await listAccessibleProjectsForUser(bobId, { workspaceSlug: workspace.slug });
-
-    expect(result.some((p) => p.id === project.id)).toBe(false);
   });
 
   it('filters direct project access by workspace slug even without workspace membership', async () => {

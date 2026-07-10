@@ -59,7 +59,11 @@ async function createProject(cookie: string, workspaceSlug: string, name: string
 }
 
 /** Add a user as a member of a workspace directly in the DB. */
-async function addWorkspaceMember(workspaceId: string, userId: string, role: 'owner' | 'manager' | 'member' = 'member') {
+async function addWorkspaceMember(
+  workspaceId: string,
+  userId: string,
+  role: 'owner' | 'manager' | 'member' = 'member',
+) {
   await db.insert(workspaceMemberships).values({
     id: `wm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     workspaceId,
@@ -69,7 +73,11 @@ async function addWorkspaceMember(workspaceId: string, userId: string, role: 'ow
 }
 
 /** Add a user as a member of a project directly in the DB. */
-async function addProjectMember(projectId: string, userId: string, role: 'owner' | 'manager' | 'member' = 'member') {
+async function addProjectMember(
+  projectId: string,
+  userId: string,
+  role: 'owner' | 'manager' | 'member' = 'member',
+) {
   await db.insert(projectMemberships).values({
     id: `pm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     projectId,
@@ -98,10 +106,16 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (createdProjectIds.length > 0) {
-    await db.delete(projects).where(inArray(projects.id, createdProjectIds)).catch(() => {});
+    await db
+      .delete(projects)
+      .where(inArray(projects.id, createdProjectIds))
+      .catch(() => {});
   }
   if (createdWorkspaceIds.length > 0) {
-    await db.delete(workspaces).where(inArray(workspaces.id, createdWorkspaceIds)).catch(() => {});
+    await db
+      .delete(workspaces)
+      .where(inArray(workspaces.id, createdWorkspaceIds))
+      .catch(() => {});
   }
   await app.close();
 });
@@ -167,6 +181,38 @@ describe('GET /api/projects', () => {
     expect(body.some((p: { name: string }) => p.name === 'List Test Project')).toBe(true);
   });
 
+  it('lists and reads a workspace project for a member without direct project access', async () => {
+    const { body: workspace } = await createWorkspace(aliceCookie, 'Member Visible Workspace');
+    await addWorkspaceMember(workspace.id, bobId, 'member');
+    const { body: project } = await createProject(
+      aliceCookie,
+      workspace.slug,
+      'Member Visible Project',
+    );
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: '/api/projects',
+      headers: { cookie: bobCookie },
+    });
+    expect(listResponse.statusCode).toBe(200);
+    expect(JSON.parse(listResponse.body)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: project.id, workspaceId: workspace.id, role: 'member' }),
+      ]),
+    );
+
+    const detailResponse = await app.inject({
+      method: 'GET',
+      url: `/api/projects/${project.slug}`,
+      headers: { cookie: bobCookie },
+    });
+    expect(detailResponse.statusCode).toBe(200);
+    expect(JSON.parse(detailResponse.body)).toEqual(
+      expect.objectContaining({ id: project.id, role: 'member' }),
+    );
+  });
+
   it('returns 401 when unauthenticated', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/projects' });
     expect(res.statusCode).toBe(401);
@@ -187,7 +233,11 @@ describe('GET /api/projects/last-active', () => {
 
   it('returns project after GET /api/projects/:projectSlug sets it', async () => {
     const { body: workspace } = await createWorkspace(aliceCookie, 'Last Active Workspace');
-    const { body: project } = await createProject(aliceCookie, workspace.slug, 'Last Active Project');
+    const { body: project } = await createProject(
+      aliceCookie,
+      workspace.slug,
+      'Last Active Project',
+    );
 
     // Fetch project by slug (sets lastActive)
     await app.inject({
@@ -262,18 +312,24 @@ describe('GET /api/projects/:projectSlug', () => {
     expect(body.role).toBe('owner'); // Synthetic owner role via override
   });
 
-  it('workspace member without project membership gets 404', async () => {
-    const { body: workspace } = await createWorkspace(aliceCookie, 'No Access Workspace');
+  it('workspace member without project membership gets synthetic member access', async () => {
+    const { body: workspace } = await createWorkspace(aliceCookie, 'Member Access Workspace');
     await addWorkspaceMember(workspace.id, bobId, 'member');
-    const { body: project } = await createProject(aliceCookie, workspace.slug, 'Alice Only Project');
+    const { body: project } = await createProject(
+      aliceCookie,
+      workspace.slug,
+      'Workspace Member Project',
+    );
 
-    // Bob is workspace member but not project member
     const res = await app.inject({
       method: 'GET',
       url: `/api/projects/${project.slug}`,
       headers: { cookie: bobCookie },
     });
-    expect(res.statusCode).toBe(404);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual(
+      expect.objectContaining({ id: project.id, role: 'member' }),
+    );
   });
 
   it('user with project-scoped access but no workspace access can read project', async () => {
@@ -345,10 +401,10 @@ describe('PATCH /api/projects/:projectSlug', () => {
     expect(body.name).toBe('Alice Updated');
   });
 
-  it('member cannot update project', async () => {
+  it('workspace member without direct project membership cannot update project', async () => {
     const { body: workspace } = await createWorkspace(aliceCookie, 'No Update Workspace');
     const { body: project } = await createProject(aliceCookie, workspace.slug, 'No Update');
-    await addProjectMember(project.id, bobId, 'member');
+    await addWorkspaceMember(workspace.id, bobId, 'member');
 
     const res = await app.inject({
       method: 'PATCH',
@@ -410,7 +466,11 @@ describe('DELETE /api/projects/:projectSlug', () => {
 
   it('member cannot delete', async () => {
     const { body: workspace } = await createWorkspace(aliceCookie, 'Member Delete Workspace');
-    const { body: project } = await createProject(aliceCookie, workspace.slug, 'Member Cannot Delete');
+    const { body: project } = await createProject(
+      aliceCookie,
+      workspace.slug,
+      'Member Cannot Delete',
+    );
     await addProjectMember(project.id, bobId, 'member');
 
     const res = await app.inject({
@@ -458,7 +518,11 @@ describe('GET /api/projects/:projectSlug/members', () => {
 describe('DELETE /api/projects/:projectSlug/members/:userId', () => {
   it('owner can remove member', async () => {
     const { body: workspace } = await createWorkspace(aliceCookie, 'Remove Member Workspace');
-    const { body: project } = await createProject(aliceCookie, workspace.slug, 'Remove Member Project');
+    const { body: project } = await createProject(
+      aliceCookie,
+      workspace.slug,
+      'Remove Member Project',
+    );
     await addProjectMember(project.id, bobId, 'member');
 
     const res = await app.inject({
@@ -471,7 +535,11 @@ describe('DELETE /api/projects/:projectSlug/members/:userId', () => {
 
   it('cannot remove self', async () => {
     const { body: workspace } = await createWorkspace(aliceCookie, 'Self Remove Workspace');
-    const { body: project } = await createProject(aliceCookie, workspace.slug, 'Self Remove Project');
+    const { body: project } = await createProject(
+      aliceCookie,
+      workspace.slug,
+      'Self Remove Project',
+    );
 
     const res = await app.inject({
       method: 'DELETE',
@@ -483,7 +551,11 @@ describe('DELETE /api/projects/:projectSlug/members/:userId', () => {
 
   it('member cannot remove others', async () => {
     const { body: workspace } = await createWorkspace(aliceCookie, 'Member Remove Workspace');
-    const { body: project } = await createProject(aliceCookie, workspace.slug, 'Member Remove Project');
+    const { body: project } = await createProject(
+      aliceCookie,
+      workspace.slug,
+      'Member Remove Project',
+    );
     await addProjectMember(project.id, bobId, 'member');
     await addProjectMember(project.id, carolId, 'member');
 
@@ -517,7 +589,11 @@ describe('GET /api/projects/:projectSlug/invites', () => {
 describe('POST /api/projects/:projectSlug/invites', () => {
   it('owner can create invite with role', async () => {
     const { body: workspace } = await createWorkspace(aliceCookie, 'Create Invite Workspace');
-    const { body: project } = await createProject(aliceCookie, workspace.slug, 'Create Invite Project');
+    const { body: project } = await createProject(
+      aliceCookie,
+      workspace.slug,
+      'Create Invite Project',
+    );
 
     const res = await app.inject({
       method: 'POST',

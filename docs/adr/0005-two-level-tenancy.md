@@ -26,20 +26,17 @@ Two access rules are deliberate invariants:
 
 - **Workspace override** (`apps/server/src/projects/resolver.ts`): a
   workspace `owner`/`manager` acts with a synthetic project `owner` role
-  on every project in the workspace, with no membership record. Direct
-  project membership takes precedence.
+  on every project in the workspace, while a workspace `member` acts with
+  a read-only synthetic project `member` role. Neither path creates a
+  project membership record, and direct project membership takes
+  precedence.
 - **404, never 403**: a user without access to an existing project gets
   `NOT_FOUND`. Non-members must not learn the project exists.
 
-## Known debt and gaps (deliberately NOT invariants)
+## Known debt (deliberately NOT an invariant)
 
 - **The duplicated implementation is debt, not design.** The near-identical
   membership/invite/role/permission/slug/service machinery at both levels
   is a retrofit artifact. Streamlining it into shared machinery is tracked
   as a cleanup issue; do not replicate the duplication when adding a
   feature to one level.
-- **Plain workspace `member` visibility is a known gap.** Today a
-  workspace `member` with no direct project membership sees zero projects
-  (the override only fires for owner/manager). This closed-by-default
-  behavior was never chosen; it reads as broken to end users and is
-  tracked as a feature-gap issue. Do not cite this ADR to defend it.
