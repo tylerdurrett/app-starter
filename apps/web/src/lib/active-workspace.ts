@@ -6,6 +6,23 @@ const PROJECT_STORAGE_KEY = 'lastActiveProjectSlug';
 const WORKSPACE_PATH_RE = /^\/w\/([^/]+)/;
 const PROJECT_PATH_RE = /^\/w\/[^/]+\/p\/([^/]+)/;
 
+/**
+ * Parse the workspace slug out of a nested `/w/:workspaceSlug/...` path.
+ * Returns null for any path that does not begin with the workspace segment.
+ */
+export function parseWorkspaceSlug(pathname: string): string | null {
+  return pathname.match(WORKSPACE_PATH_RE)?.[1] ?? null;
+}
+
+/**
+ * Parse the project slug out of a nested `/w/:workspaceSlug/p/:projectSlug` path.
+ * Returns null for the legacy flat `/p/:projectSlug` shape — the workspace-nested
+ * route is the only surface that resolves a project after ADR-0009.
+ */
+export function parseProjectSlug(pathname: string): string | null {
+  return pathname.match(PROJECT_PATH_RE)?.[1] ?? null;
+}
+
 function safeRead(key: string): string | null {
   try {
     return window.localStorage.getItem(key);
@@ -43,7 +60,7 @@ export function useActiveWorkspaceSlug(): ActiveWorkspaceContext {
   const projectWorkspaceSlug = projectLoader?.project.workspaceSlug ?? null;
   const urlProjectWorkspaceName = projectLoader?.project.workspaceName ?? null;
 
-  const urlSlug = currentPath.match(WORKSPACE_PATH_RE)?.[1] ?? projectWorkspaceSlug;
+  const urlSlug = parseWorkspaceSlug(currentPath) ?? projectWorkspaceSlug;
 
   useEffect(() => {
     if (urlSlug) safeWrite(WORKSPACE_STORAGE_KEY, urlSlug);
@@ -55,7 +72,7 @@ export function useActiveWorkspaceSlug(): ActiveWorkspaceContext {
 
 export function useActiveProjectSlug(): { slug: string | null; fromUrl: boolean } {
   const router = useRouterState();
-  const urlSlug = router.location.pathname.match(PROJECT_PATH_RE)?.[1] ?? null;
+  const urlSlug = parseProjectSlug(router.location.pathname);
 
   useEffect(() => {
     if (urlSlug) safeWrite(PROJECT_STORAGE_KEY, urlSlug);
