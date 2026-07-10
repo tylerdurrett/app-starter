@@ -21,13 +21,19 @@ interface ProjectRedirectTarget {
 export async function resolveProject(): Promise<ProjectRedirectTarget> {
   const lastActive = await getLastActiveProject();
   if (lastActive) {
-    return { to: '/p/$projectSlug', params: { projectSlug: lastActive.slug } };
+    return {
+      to: '/w/$workspaceSlug/p/$projectSlug',
+      params: { workspaceSlug: lastActive.workspaceSlug, projectSlug: lastActive.slug },
+    };
   }
 
   const projects = await listProjects();
   const firstProject = projects[0];
   if (firstProject) {
-    return { to: '/p/$projectSlug', params: { projectSlug: firstProject.slug } };
+    return {
+      to: '/w/$workspaceSlug/p/$projectSlug',
+      params: { workspaceSlug: firstProject.workspaceSlug, projectSlug: firstProject.slug },
+    };
   }
 
   // Fall back to workspace if no projects exist (Phase 4 compatibility)

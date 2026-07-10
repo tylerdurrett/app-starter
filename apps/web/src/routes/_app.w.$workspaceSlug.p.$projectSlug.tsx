@@ -5,10 +5,10 @@ import { getProject } from '../lib/projects';
 import { ApiError } from '../lib/api';
 import { resolveProject } from '../lib/project-resolver';
 
-export const Route = createFileRoute('/_app/p/$projectSlug')({
+export const Route = createFileRoute('/_app/w/$workspaceSlug/p/$projectSlug')({
   loader: async ({ params }) => {
     try {
-      const project = await getProject(params.projectSlug);
+      const project = await getProject(params.workspaceSlug, params.projectSlug);
       return { project };
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
