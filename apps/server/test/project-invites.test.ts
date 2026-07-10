@@ -56,10 +56,16 @@ async function createProject(cookie: string, workspaceSlug: string, name: string
 }
 
 /** Create an invite via the API and return the invite + token + inviteUrl. */
-async function createInviteViaApi(cookie: string, projectSlug: string, email: string, role?: 'manager' | 'member') {
+async function createInviteViaApi(
+  cookie: string,
+  workspaceSlug: string,
+  projectSlug: string,
+  email: string,
+  role?: 'manager' | 'member',
+) {
   const res = await app.inject({
     method: 'POST',
-    url: `/api/projects/${projectSlug}/invites`,
+    url: `/api/workspaces/${workspaceSlug}/projects/${projectSlug}/invites`,
     headers: { 'content-type': 'application/json', cookie },
     payload: { email, role },
   });
@@ -99,7 +105,7 @@ describe('GET /api/project-invites/:token', () => {
   it('returns safe invite summary without authentication', async () => {
     const workspace = await createWorkspace(aliceCookie, 'Token Fetch Workspace');
     const project = await createProject(aliceCookie, workspace.slug, 'Token Fetch Project');
-    const { token } = await createInviteViaApi(aliceCookie, project.slug, 'tokenfetch@test.com');
+    const { token } = await createInviteViaApi(aliceCookie, workspace.slug, project.slug, 'tokenfetch@test.com');
 
     const res = await app.inject({
       method: 'GET',
@@ -126,12 +132,12 @@ describe('GET /api/project-invites/:token', () => {
   it('returns metadata with status=revoked for revoked invite (so the landing page can render an explicit card)', async () => {
     const workspace = await createWorkspace(aliceCookie, 'Revoked Workspace');
     const project = await createProject(aliceCookie, workspace.slug, 'Revoked Project');
-    const { invite, token } = await createInviteViaApi(aliceCookie, project.slug, 'revoked@test.com');
+    const { invite, token } = await createInviteViaApi(aliceCookie, workspace.slug, project.slug, 'revoked@test.com');
 
     // Revoke the invite
     await app.inject({
       method: 'POST',
-      url: `/api/projects/${project.slug}/invites/${invite.id}/revoke`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/invites/${invite.id}/revoke`,
       headers: { cookie: aliceCookie },
     });
 
@@ -150,7 +156,7 @@ describe('POST /api/project-invites/:token/accept', () => {
   it('accepts invite for email-matching user', async () => {
     const workspace = await createWorkspace(aliceCookie, 'Accept Workspace');
     const project = await createProject(aliceCookie, workspace.slug, 'Accept Project');
-    const { token } = await createInviteViaApi(aliceCookie, project.slug, bobEmail, 'manager');
+    const { token } = await createInviteViaApi(aliceCookie, workspace.slug, project.slug, bobEmail, 'manager');
 
     const res = await app.inject({
       method: 'POST',
@@ -165,7 +171,7 @@ describe('POST /api/project-invites/:token/accept', () => {
     // Verify Bob can now access the project
     const check = await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { cookie: bobCookie },
     });
     expect(check.statusCode).toBe(200);
@@ -176,7 +182,7 @@ describe('POST /api/project-invites/:token/accept', () => {
   it('returns 403 for email mismatch', async () => {
     const workspace = await createWorkspace(aliceCookie, 'Mismatch Workspace');
     const project = await createProject(aliceCookie, workspace.slug, 'Mismatch Project');
-    const { token } = await createInviteViaApi(aliceCookie, project.slug, 'other@test.com');
+    const { token } = await createInviteViaApi(aliceCookie, workspace.slug, project.slug, 'other@test.com');
 
     const res = await app.inject({
       method: 'POST',
@@ -191,7 +197,7 @@ describe('POST /api/project-invites/:token/accept', () => {
   it('returns 401 when unauthenticated', async () => {
     const workspace = await createWorkspace(aliceCookie, 'Auth Workspace');
     const project = await createProject(aliceCookie, workspace.slug, 'Auth Project');
-    const { token } = await createInviteViaApi(aliceCookie, project.slug, 'auth@test.com');
+    const { token } = await createInviteViaApi(aliceCookie, workspace.slug, project.slug, 'auth@test.com');
 
     const res = await app.inject({
       method: 'POST',
@@ -208,7 +214,7 @@ describe('POST /api/project-invites/:token/accept', () => {
 
     const workspace = await createWorkspace(aliceCookie, 'Already Workspace');
     const project = await createProject(aliceCookie, workspace.slug, 'Already Project');
-    const { token } = await createInviteViaApi(aliceCookie, project.slug, carolEmail);
+    const { token } = await createInviteViaApi(aliceCookie, workspace.slug, project.slug, carolEmail);
 
     // Accept once
     await app.inject({
@@ -231,7 +237,7 @@ describe('POST /api/project-invites/:token/accept', () => {
   it('returns 409 when accepting an expired invite', async () => {
     const workspace = await createWorkspace(aliceCookie, 'Expired Workspace');
     const project = await createProject(aliceCookie, workspace.slug, 'Expired Project');
-    const { invite, token } = await createInviteViaApi(aliceCookie, project.slug, bobEmail);
+    const { invite, token } = await createInviteViaApi(aliceCookie, workspace.slug, project.slug, bobEmail);
 
     // Manually expire the invite in DB
     await db

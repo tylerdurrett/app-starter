@@ -29,8 +29,8 @@ export class ServiceError extends Error {
 export async function resolveProjectAndRole(
   slug: string,
   actorUserId: string,
-  requiredPermission?: ProjectPermission,
-  workspaceSlug?: string,
+  requiredPermission: ProjectPermission | undefined,
+  workspaceSlug: string,
 ): Promise<{ project: typeof projects.$inferSelect; role: ProjectRole }> {
   const result = await resolveProjectWithOverride(
     slug,
@@ -242,7 +242,7 @@ export async function listAccessibleProjectsForUser(
     .map(({ workspaceCreatedAt: _workspaceCreatedAt, ...project }) => project);
 }
 
-export async function getProjectBySlug(slug: string, actorUserId: string, workspaceSlug?: string) {
+export async function getProjectBySlug(slug: string, actorUserId: string, workspaceSlug: string) {
   return resolveProjectAndRole(slug, actorUserId, undefined, workspaceSlug);
 }
 
@@ -250,7 +250,7 @@ export async function updateProject(
   slug: string,
   actorUserId: string,
   { name }: { name?: string },
-  workspaceSlug?: string,
+  workspaceSlug: string,
 ) {
   const { project } = await resolveProjectAndRole(slug, actorUserId, 'project:edit', workspaceSlug);
 
@@ -270,7 +270,7 @@ export async function deleteProject(
   slug: string,
   actorUserId: string,
   { confirmation }: { confirmation: string },
-  workspaceSlug?: string,
+  workspaceSlug: string,
 ) {
   const { project } = await resolveProjectAndRole(
     slug,
@@ -286,7 +286,7 @@ export async function deleteProject(
   await db.delete(projects).where(eq(projects.id, project.id));
 }
 
-export async function listMembers(slug: string, actorUserId: string, workspaceSlug?: string) {
+export async function listMembers(slug: string, actorUserId: string, workspaceSlug: string) {
   const { project } = await resolveProjectAndRole(
     slug,
     actorUserId,
@@ -311,7 +311,7 @@ export async function removeMember(
   slug: string,
   actorUserId: string,
   targetUserId: string,
-  workspaceSlug?: string,
+  workspaceSlug: string,
 ) {
   const { project } = await resolveProjectAndRole(
     slug,

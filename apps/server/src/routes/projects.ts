@@ -18,15 +18,18 @@ import { db, workspaces } from '@repo/db';
 import { eq } from 'drizzle-orm';
 
 interface ProjectSlugParams {
+  workspaceSlug: string;
   projectSlug: string;
 }
 
 interface ProjectSlugUserIdParams {
+  workspaceSlug: string;
   projectSlug: string;
   userId: string;
 }
 
 interface ProjectSlugInviteIdParams {
+  workspaceSlug: string;
   projectSlug: string;
   inviteId: string;
 }
@@ -57,93 +60,117 @@ const projectRoutes: FastifyPluginAsync = async (app) => {
     return getLastActiveProject(user.id);
   });
 
-  app.get<{ Params: ProjectSlugParams }>('/api/projects/:projectSlug', async (request) => {
-    const { user } = await requireUser(request);
-    const { projectSlug } = request.params;
-    const { project, role } = await getProjectBySlug(projectSlug, user.id);
-    // Fire-and-forget: failure to update last-active preference is non-critical
-    setLastActiveProject(user.id, project.id).catch(() => {});
-    // Enrich with workspace slug/name so the client can render workspace context
-    // on project pages (needed by 4.1 switcher, including project-only access)
-    const [workspace] = await db
-      .select({ slug: workspaces.slug, name: workspaces.name })
-      .from(workspaces)
-      .where(eq(workspaces.id, project.workspaceId));
-    return {
-      ...project,
-      role,
-      workspaceSlug: workspace?.slug ?? null,
-      workspaceName: workspace?.name ?? null,
-    };
-  });
-
-  app.patch<{ Params: ProjectSlugParams; Body: { name?: string } }>(
-    '/api/projects/:projectSlug',
+  app.get<{ Params: ProjectSlugParams }>(
+    '/api/workspaces/:workspaceSlug/projects/:projectSlug',
     async (request) => {
       const { user } = await requireUser(request);
-      const { projectSlug } = request.params;
-      return updateProject(projectSlug, user.id, {
-        name: request.body.name,
-      });
+      const { workspaceSlug, projectSlug } = request.params;
+      const { project, role } = await getProjectBySlug(projectSlug, user.id, workspaceSlug);
+      // Fire-and-forget: failure to update last-active preference is non-critical
+      setLastActiveProject(user.id, project.id).catch(() => {});
+      // Enrich with workspace slug/name so the client can render workspace context
+      // on project pages (needed by 4.1 switcher, including project-only access)
+      const [workspace] = await db
+        .select({ slug: workspaces.slug, name: workspaces.name })
+        .from(workspaces)
+        .where(eq(workspaces.id, project.workspaceId));
+      return {
+        ...project,
+        role,
+        workspaceSlug: workspace?.slug ?? null,
+        workspaceName: workspace?.name ?? null,
+      };
+    },
+  );
+
+  app.patch<{ Params: ProjectSlugParams; Body: { name?: string } }>(
+    '/api/workspaces/:workspaceSlug/projects/:projectSlug',
+    async (request) => {
+      const { user } = await requireUser(request);
+      const { workspaceSlug, projectSlug } = request.params;
+      return updateProject(
+        projectSlug,
+        user.id,
+        {
+          name: request.body.name,
+        },
+        workspaceSlug,
+      );
     },
   );
 
   app.delete<{ Params: ProjectSlugParams; Body: { confirmation: string } }>(
-    '/api/projects/:projectSlug',
+    '/api/workspaces/:workspaceSlug/projects/:projectSlug',
     async (request, reply) => {
       const { user } = await requireUser(request);
-      const { projectSlug } = request.params;
-      await deleteProject(projectSlug, user.id, { confirmation: request.body.confirmation });
+      const { workspaceSlug, projectSlug } = request.params;
+      await deleteProject(
+        projectSlug,
+        user.id,
+        { confirmation: request.body.confirmation },
+        workspaceSlug,
+      );
       return reply.status(204).send();
     },
   );
 
   // --- Members ---
 
-  app.get<{ Params: ProjectSlugParams }>('/api/projects/:projectSlug/members', async (request) => {
-    const { user } = await requireUser(request);
-    const { projectSlug } = request.params;
-    return listMembers(projectSlug, user.id);
-  });
+  app.get<{ Params: ProjectSlugParams }>(
+    '/api/workspaces/:workspaceSlug/projects/:projectSlug/members',
+    async (request) => {
+      const { user } = await requireUser(request);
+      const { workspaceSlug, projectSlug } = request.params;
+      return listMembers(projectSlug, user.id, workspaceSlug);
+    },
+  );
 
   app.delete<{ Params: ProjectSlugUserIdParams }>(
-    '/api/projects/:projectSlug/members/:userId',
+    '/api/workspaces/:workspaceSlug/projects/:projectSlug/members/:userId',
     async (request, reply) => {
       const { user } = await requireUser(request);
-      const { projectSlug, userId } = request.params;
-      await removeMember(projectSlug, user.id, userId);
+      const { workspaceSlug, projectSlug, userId } = request.params;
+      await removeMember(projectSlug, user.id, userId, workspaceSlug);
       return reply.status(204).send();
     },
   );
 
   // --- Invites (project-scoped) ---
 
-  app.get<{ Params: ProjectSlugParams }>('/api/projects/:projectSlug/invites', async (request) => {
-    const { user } = await requireUser(request);
-    const { projectSlug } = request.params;
-    return listInvites(projectSlug, user.id);
-  });
+  app.get<{ Params: ProjectSlugParams }>(
+    '/api/workspaces/:workspaceSlug/projects/:projectSlug/invites',
+    async (request) => {
+      const { user } = await requireUser(request);
+      const { workspaceSlug, projectSlug } = request.params;
+      return listInvites(projectSlug, user.id, workspaceSlug);
+    },
+  );
 
   app.post<{ Params: ProjectSlugParams; Body: { email: string; role?: 'manager' | 'member' } }>(
-    '/api/projects/:projectSlug/invites',
+    '/api/workspaces/:workspaceSlug/projects/:projectSlug/invites',
     async (request, reply) => {
       const { user } = await requireUser(request);
-      const { projectSlug } = request.params;
-      const { invite, token } = await createInvite(projectSlug, user.id, {
-        email: request.body.email,
-        role: request.body.role
-      });
+      const { workspaceSlug, projectSlug } = request.params;
+      const { invite, token } = await createInvite(
+        projectSlug,
+        user.id,
+        {
+          email: request.body.email,
+          role: request.body.role,
+        },
+        workspaceSlug,
+      );
       const inviteUrl = `${config.webOrigin}/invite/project/${token}`;
       return reply.status(201).send({ invite, inviteUrl });
     },
   );
 
   app.post<{ Params: ProjectSlugInviteIdParams }>(
-    '/api/projects/:projectSlug/invites/:inviteId/revoke',
+    '/api/workspaces/:workspaceSlug/projects/:projectSlug/invites/:inviteId/revoke',
     async (request, reply) => {
       const { user } = await requireUser(request);
-      const { projectSlug, inviteId } = request.params;
-      await revokeInvite(projectSlug, user.id, inviteId);
+      const { workspaceSlug, projectSlug, inviteId } = request.params;
+      await revokeInvite(projectSlug, user.id, inviteId, workspaceSlug);
       return reply.status(204).send();
     },
   );

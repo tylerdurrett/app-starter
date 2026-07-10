@@ -54,7 +54,7 @@ export async function requireProjectPermission(
   req: FastifyRequest,
   projectSlug: string,
   permission: ProjectPermission,
-  workspaceSlug?: string,
+  workspaceSlug: string,
 ) {
   const { user } = await requireUser(req);
   // ServiceError from resolveProjectWithOverride bubbles to the global error handler
