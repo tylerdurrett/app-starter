@@ -92,8 +92,8 @@ export function ProjectSwitcher({
                   return (
                     <li key={project.id}>
                       <Link
-                        to="/p/$projectSlug"
-                        params={{ projectSlug: project.slug }}
+                        to="/w/$workspaceSlug/p/$projectSlug"
+                        params={{ workspaceSlug, projectSlug: project.slug }}
                         onClick={close}
                         className={selectorRowClass(isActive)}
                       >
@@ -131,8 +131,8 @@ export function ProjectSwitcher({
               <>
                 <SelectorDivider />
                 <Link
-                  to="/p/$projectSlug/settings"
-                  params={{ projectSlug: activeProject.slug }}
+                  to="/w/$workspaceSlug/p/$projectSlug/settings"
+                  params={{ workspaceSlug, projectSlug: activeProject.slug }}
                   onClick={close}
                   className="flex items-center gap-2 px-2 py-1.5 rounded text-sm w-full text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
                 >
@@ -155,7 +155,10 @@ export function ProjectSwitcher({
               ? prev
               : [...prev, { ...project, role: 'owner' }],
           );
-          navigate({ to: '/p/$projectSlug', params: { projectSlug: project.slug } });
+          navigate({
+            to: '/w/$workspaceSlug/p/$projectSlug',
+            params: { workspaceSlug, projectSlug: project.slug },
+          });
         }}
       />
     </>

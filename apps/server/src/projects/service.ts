@@ -117,6 +117,8 @@ export async function listProjectsForUser(userId: string) {
     .map(({ workspace, access: _access, ...project }) => ({
       ...project,
       workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
     }))
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
 }
@@ -368,6 +370,8 @@ export async function getLastActiveProject(userId: string) {
       name: projects.name,
       slug: projects.slug,
       workspaceId: projects.workspaceId,
+      workspaceSlug: workspaces.slug,
+      workspaceName: workspaces.name,
       createdAt: projects.createdAt,
       updatedAt: projects.updatedAt,
       role: projectMemberships.role,
@@ -377,6 +381,7 @@ export async function getLastActiveProject(userId: string) {
       projectMemberships,
       and(eq(projectMemberships.projectId, projects.id), eq(projectMemberships.userId, userId)),
     )
+    .innerJoin(workspaces, eq(workspaces.id, projects.workspaceId))
     .where(eq(projects.id, user.lastActiveProjectId));
 
   return membership || null;

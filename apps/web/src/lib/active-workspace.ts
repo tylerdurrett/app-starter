@@ -38,7 +38,7 @@ export function useActiveWorkspaceSlug(): ActiveWorkspaceContext {
   const router = useRouterState();
   const currentPath = router.location.pathname;
 
-  const projectMatch = useMatch({ from: '/_app/p/$projectSlug', shouldThrow: false });
+  const projectMatch = useMatch({ from: '/_app/w/$workspaceSlug/p/$projectSlug', shouldThrow: false });
   const projectLoader = projectMatch?.loaderData as ProjectLoaderData | undefined;
   const projectWorkspaceSlug = projectLoader?.project.workspaceSlug ?? null;
   const urlProjectWorkspaceName = projectLoader?.project.workspaceName ?? null;
