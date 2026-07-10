@@ -44,6 +44,14 @@ function safeWrite(key: string, value: string): void {
   }
 }
 
+function safeRemove(key: string): void {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // storage disabled (private mode, quota, etc.) — nothing to clear
+  }
+}
+
 /**
  * The stored active-context unit: a coherent `(workspace, project)` pair, plus
  * the server `projectId` when it was known at write time. Always written whole.
@@ -86,11 +94,7 @@ export function writeActiveContext(ctx: StoredActiveContext): void {
 
 /** Safe removal of the single unit. Swallows storage errors. */
 export function clearActiveContext(): void {
-  try {
-    window.localStorage.removeItem(ACTIVE_CONTEXT_KEY);
-  } catch {
-    // storage disabled (private mode, quota, etc.) — nothing to clear
-  }
+  safeRemove(ACTIVE_CONTEXT_KEY);
 }
 
 /**
