@@ -18,9 +18,9 @@ import {
 } from '../lib/projects';
 import { Copy, UserMinus, X } from 'lucide-react';
 
-const projectRoute = getRouteApi('/_app/p/$projectSlug');
+const projectRoute = getRouteApi('/_app/w/$workspaceSlug/p/$projectSlug');
 
-export const Route = createFileRoute('/_app/p/$projectSlug/settings')({
+export const Route = createFileRoute('/_app/w/$workspaceSlug/p/$projectSlug/settings')({
   component: ProjectSettingsPage,
 });
 
