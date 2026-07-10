@@ -105,7 +105,10 @@ afterAll(async () => {
 
 describe('resolveProjectWithOverride', () => {
   it('throws NOT_FOUND for a non-existent project slug', async () => {
-    await expect(resolveProjectWithOverride('no-such-project', ownerId)).rejects.toMatchObject({
+    const ws = await createWs('Nonexistent Slug Ws', wsOwnerId);
+    await expect(
+      resolveProjectWithOverride('no-such-project', ownerId, undefined, ws.slug),
+    ).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
   });
@@ -114,7 +117,7 @@ describe('resolveProjectWithOverride', () => {
     const ws = await createWs('Direct Member Ws', wsOwnerId);
     const proj = await createProj('Direct Member Proj', ws.id, ownerId);
 
-    const result = await resolveProjectWithOverride(proj.slug, ownerId);
+    const result = await resolveProjectWithOverride(proj.slug, ownerId, undefined, ws.slug);
     expect(result.role).toBe('owner');
     expect(result.viaWorkspaceOverride).toBeFalsy();
     expect(result.project.id).toBe(proj.id);
@@ -125,7 +128,7 @@ describe('resolveProjectWithOverride', () => {
     const proj = await createProj('Direct Mgr Proj', ws.id, ownerId);
     await addProjectMember(proj.id, wsMemberId, 'manager');
 
-    const result = await resolveProjectWithOverride(proj.slug, wsMemberId);
+    const result = await resolveProjectWithOverride(proj.slug, wsMemberId, undefined, ws.slug);
     expect(result.role).toBe('manager');
     expect(result.viaWorkspaceOverride).toBeFalsy();
   });
@@ -135,7 +138,7 @@ describe('resolveProjectWithOverride', () => {
     const proj = await createProj('Direct Mem Proj', ws.id, ownerId);
     await addProjectMember(proj.id, wsMemberId, 'member');
 
-    const result = await resolveProjectWithOverride(proj.slug, wsMemberId);
+    const result = await resolveProjectWithOverride(proj.slug, wsMemberId, undefined, ws.slug);
     expect(result.role).toBe('member');
     expect(result.viaWorkspaceOverride).toBeFalsy();
   });
@@ -145,7 +148,7 @@ describe('resolveProjectWithOverride', () => {
     // Project created by ownerId; wsOwner has no direct project membership.
     const proj = await createProj('WsOwner Override Proj', ws.id, ownerId);
 
-    const result = await resolveProjectWithOverride(proj.slug, wsOwnerId);
+    const result = await resolveProjectWithOverride(proj.slug, wsOwnerId, undefined, ws.slug);
     expect(result.role).toBe('owner');
     expect(result.viaWorkspaceOverride).toBe(true);
   });
@@ -155,7 +158,7 @@ describe('resolveProjectWithOverride', () => {
     await addWorkspaceMember(ws.id, wsManagerId, 'manager');
     const proj = await createProj('WsMgr Override Proj', ws.id, ownerId);
 
-    const result = await resolveProjectWithOverride(proj.slug, wsManagerId);
+    const result = await resolveProjectWithOverride(proj.slug, wsManagerId, undefined, ws.slug);
     expect(result.role).toBe('owner');
     expect(result.viaWorkspaceOverride).toBe(true);
   });
@@ -165,7 +168,7 @@ describe('resolveProjectWithOverride', () => {
     await addWorkspaceMember(ws.id, wsMemberId, 'member');
     const proj = await createProj('WsMem Read Access Proj', ws.id, ownerId);
 
-    const result = await resolveProjectWithOverride(proj.slug, wsMemberId, 'project:read');
+    const result = await resolveProjectWithOverride(proj.slug, wsMemberId, 'project:read', ws.slug);
 
     expect(result.role).toBe('member');
     expect(result.viaWorkspaceOverride).toBe(true);
@@ -177,7 +180,7 @@ describe('resolveProjectWithOverride', () => {
     const proj = await createProj('WsMem Edit Access Proj', ws.id, ownerId);
 
     await expect(
-      resolveProjectWithOverride(proj.slug, wsMemberId, 'project:edit'),
+      resolveProjectWithOverride(proj.slug, wsMemberId, 'project:edit', ws.slug),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
@@ -185,7 +188,9 @@ describe('resolveProjectWithOverride', () => {
     const ws = await createWs('Outsider Ws', wsOwnerId);
     const proj = await createProj('Outsider Proj', ws.id, ownerId);
 
-    await expect(resolveProjectWithOverride(proj.slug, outsiderId)).rejects.toMatchObject({
+    await expect(
+      resolveProjectWithOverride(proj.slug, outsiderId, undefined, ws.slug),
+    ).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
   });
@@ -197,7 +202,7 @@ describe('resolveProjectWithOverride', () => {
     const proj = await createProj('Precedence Proj', ws.id, ownerId);
     await addProjectMember(proj.id, wsOwnerId, 'member');
 
-    const result = await resolveProjectWithOverride(proj.slug, wsOwnerId);
+    const result = await resolveProjectWithOverride(proj.slug, wsOwnerId, undefined, ws.slug);
     expect(result.role).toBe('member');
     expect(result.viaWorkspaceOverride).toBeFalsy();
   });
@@ -209,7 +214,7 @@ describe('resolveProjectWithOverride', () => {
 
     // project member cannot delete
     await expect(
-      resolveProjectWithOverride(proj.slug, wsMemberId, 'project:delete'),
+      resolveProjectWithOverride(proj.slug, wsMemberId, 'project:delete', ws.slug),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
@@ -217,8 +222,67 @@ describe('resolveProjectWithOverride', () => {
     const ws = await createWs('Perm Override Ws', wsOwnerId);
     const proj = await createProj('Perm Override Proj', ws.id, ownerId);
 
-    const result = await resolveProjectWithOverride(proj.slug, wsOwnerId, 'project:delete');
+    const result = await resolveProjectWithOverride(proj.slug, wsOwnerId, 'project:delete', ws.slug);
     expect(result.role).toBe('owner');
     expect(result.viaWorkspaceOverride).toBe(true);
+  });
+});
+
+describe('resolveProjectWithOverride by (workspace, slug)', () => {
+  it('resolves each duplicate-slug project under its own workspace', async () => {
+    const wsA = await createWs('Composite Ws A', wsOwnerId);
+    const wsB = await createWs('Composite Ws B', wsOwnerId);
+    // Same name in both workspaces -> identical bare slug (slug is workspace-scoped).
+    const projA = await createProj('Shared Slug Proj', wsA.id, ownerId);
+    const projB = await createProj('Shared Slug Proj', wsB.id, ownerId);
+    expect(projA.slug).toBe(projB.slug);
+
+    const resultA = await resolveProjectWithOverride(projA.slug, ownerId, undefined, wsA.slug);
+    const resultB = await resolveProjectWithOverride(projB.slug, ownerId, undefined, wsB.slug);
+
+    expect(resultA.project.id).toBe(projA.id);
+    expect(resultB.project.id).toBe(projB.id);
+  });
+
+  it('resolves via composite key without requiring workspace membership (non-authorizing join)', async () => {
+    // ownerId has DIRECT project membership but is NOT a member of the workspace
+    // (wsOwnerId owns it). The composite lookup must still find the project.
+    const ws = await createWs('Composite NonMember Ws', wsOwnerId);
+    const proj = await createProj('Composite NonMember Proj', ws.id, ownerId);
+
+    const result = await resolveProjectWithOverride(proj.slug, ownerId, undefined, ws.slug);
+    expect(result.project.id).toBe(proj.id);
+    expect(result.role).toBe('owner');
+  });
+
+  it('returns NOT_FOUND when the slug exists only in a different workspace', async () => {
+    const wsA = await createWs('Wrong Ws Source', wsOwnerId);
+    const wsB = await createWs('Wrong Ws Target', wsOwnerId);
+    const proj = await createProj('Only In A Proj', wsA.id, ownerId);
+
+    // Looked up under wsB (where no such slug exists) -> NOT_FOUND, never FORBIDDEN.
+    await expect(
+      resolveProjectWithOverride(proj.slug, ownerId, undefined, wsB.slug),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('returns NOT_FOUND for an unknown workspace slug', async () => {
+    const ws = await createWs('Composite Unknown Ws', wsOwnerId);
+    const proj = await createProj('Composite Unknown Proj', ws.id, ownerId);
+
+    await expect(
+      resolveProjectWithOverride(proj.slug, ownerId, undefined, 'no-such-workspace'),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('preserves NOT_FOUND (not FORBIDDEN) access denial under the composite lookup', async () => {
+    // outsider has neither project nor workspace access; composite lookup finds
+    // the row but access denial must still surface as NOT_FOUND.
+    const ws = await createWs('Composite Denial Ws', wsOwnerId);
+    const proj = await createProj('Composite Denial Proj', ws.id, ownerId);
+
+    await expect(
+      resolveProjectWithOverride(proj.slug, outsiderId, undefined, ws.slug),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 });

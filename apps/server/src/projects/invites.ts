@@ -10,8 +10,13 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-export async function listInvites(slug: string, actorUserId: string) {
-  const { project } = await resolveProjectAndRole(slug, actorUserId, 'project:invites:list');
+export async function listInvites(slug: string, actorUserId: string, workspaceSlug: string) {
+  const { project } = await resolveProjectAndRole(
+    slug,
+    actorUserId,
+    'project:invites:list',
+    workspaceSlug,
+  );
 
   return db
     .select({
@@ -37,8 +42,14 @@ export async function createInvite(
   slug: string,
   actorUserId: string,
   { email, role = 'member' }: { email: string; role?: 'manager' | 'member' },
+  workspaceSlug: string,
 ) {
-  const { project } = await resolveProjectAndRole(slug, actorUserId, 'project:members:invite');
+  const { project } = await resolveProjectAndRole(
+    slug,
+    actorUserId,
+    'project:members:invite',
+    workspaceSlug,
+  );
   const normalizedEmail = email.toLowerCase().trim();
 
   // Check if email is already a member
@@ -92,8 +103,18 @@ export async function createInvite(
   return { invite, token: rawToken };
 }
 
-export async function revokeInvite(slug: string, actorUserId: string, inviteId: string) {
-  const { project } = await resolveProjectAndRole(slug, actorUserId, 'project:invites:revoke');
+export async function revokeInvite(
+  slug: string,
+  actorUserId: string,
+  inviteId: string,
+  workspaceSlug: string,
+) {
+  const { project } = await resolveProjectAndRole(
+    slug,
+    actorUserId,
+    'project:invites:revoke',
+    workspaceSlug,
+  );
 
   const [invite] = await db
     .select()
