@@ -6,6 +6,8 @@ export interface Project {
   name: string;
   slug: string;
   workspaceId: string;
+  workspaceSlug: string;
+  workspaceName: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -16,10 +18,8 @@ export interface ProjectWithRole extends Project {
 
 // Returned by GET /api/projects/:projectSlug — includes workspace context so the
 // nav shell can render the parent workspace even when the user has project-only access.
-export interface ProjectWithWorkspace extends ProjectWithRole {
-  workspaceSlug: string | null;
-  workspaceName: string | null;
-}
+// workspaceSlug/workspaceName are inherited from Project (always non-null).
+export type ProjectWithWorkspace = ProjectWithRole;
 
 export async function getLastActiveProject(): Promise<Project | null> {
   return apiFetch<Project | null>('/api/projects/last-active');
