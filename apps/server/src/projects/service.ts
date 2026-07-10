@@ -6,7 +6,7 @@ import {
   workspaces,
   workspaceMemberships,
 } from '@repo/db';
-import { eq, and, asc, inArray } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { slugify, ensureUniqueSlug } from './slug.js';
 import { type ProjectRole, type ProjectPermission } from './permissions.js';
@@ -66,20 +66,14 @@ export async function createProject({
 }
 
 export async function listProjectsForUser(userId: string) {
-  return db
-    .select({
-      id: projects.id,
-      name: projects.name,
-      slug: projects.slug,
-      workspaceId: projects.workspaceId,
-      createdAt: projects.createdAt,
-      updatedAt: projects.updatedAt,
-      role: projectMemberships.role,
-    })
-    .from(projectMemberships)
-    .innerJoin(projects, eq(projectMemberships.projectId, projects.id))
-    .where(eq(projectMemberships.userId, userId))
-    .orderBy(asc(projects.createdAt));
+  const accessibleProjects = await listAccessibleProjectsForUser(userId);
+
+  return accessibleProjects
+    .map(({ workspace, access: _access, ...project }) => ({
+      ...project,
+      workspaceId: workspace.id,
+    }))
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
 }
 
 export interface AccessibleProject {
@@ -87,7 +81,7 @@ export interface AccessibleProject {
   name: string;
   slug: string;
   role: ProjectRole;
-  access: 'project_membership' | 'workspace_admin';
+  access: 'project_membership' | 'workspace_admin' | 'workspace_member';
   createdAt: Date;
   updatedAt: Date;
   workspace: {
@@ -102,8 +96,8 @@ interface AccessibleProjectRow extends AccessibleProject {
 }
 
 /**
- * List every project the user can read, including workspace owner/manager
- * override access. Direct project membership keeps the same precedence as
+ * List every project the user can read through workspace or project access.
+ * Direct project membership keeps the same precedence as
  * resolveProjectWithOverride().
  */
 export async function listAccessibleProjectsForUser(
@@ -132,22 +126,16 @@ export async function listAccessibleProjectsForUser(
     .innerJoin(workspaces, eq(projects.workspaceId, workspaces.id))
     .where(directWhere);
 
-  const adminWhere = opts.workspaceSlug
-    ? and(
-        eq(workspaceMemberships.userId, userId),
-        inArray(workspaceMemberships.role, ['owner', 'manager']),
-        eq(workspaces.slug, opts.workspaceSlug),
-      )
-    : and(
-        eq(workspaceMemberships.userId, userId),
-        inArray(workspaceMemberships.role, ['owner', 'manager']),
-      );
+  const workspaceWhere = opts.workspaceSlug
+    ? and(eq(workspaceMemberships.userId, userId), eq(workspaces.slug, opts.workspaceSlug))
+    : eq(workspaceMemberships.userId, userId);
 
-  const adminProjects = await db
+  const workspaceProjects = await db
     .select({
       id: projects.id,
       name: projects.name,
       slug: projects.slug,
+      workspaceRole: workspaceMemberships.role,
       createdAt: projects.createdAt,
       updatedAt: projects.updatedAt,
       workspaceId: workspaces.id,
@@ -158,7 +146,7 @@ export async function listAccessibleProjectsForUser(
     .from(workspaceMemberships)
     .innerJoin(workspaces, eq(workspaceMemberships.workspaceId, workspaces.id))
     .innerJoin(projects, eq(projects.workspaceId, workspaces.id))
-    .where(adminWhere);
+    .where(workspaceWhere);
 
   const rowsByProjectId = new Map<string, AccessibleProjectRow>();
 
@@ -180,14 +168,15 @@ export async function listAccessibleProjectsForUser(
     });
   }
 
-  for (const project of adminProjects) {
+  for (const project of workspaceProjects) {
     if (rowsByProjectId.has(project.id)) continue;
+    const hasAdminAccess = project.workspaceRole === 'owner' || project.workspaceRole === 'manager';
     rowsByProjectId.set(project.id, {
       id: project.id,
       name: project.name,
       slug: project.slug,
-      role: 'owner',
-      access: 'workspace_admin',
+      role: hasAdminAccess ? 'owner' : 'member',
+      access: hasAdminAccess ? 'workspace_admin' : 'workspace_member',
       createdAt: project.createdAt,
       updatedAt: project.updatedAt,
       workspaceCreatedAt: project.workspaceCreatedAt,
