@@ -48,7 +48,7 @@ export async function createProject({
   // Fallback for names that produce an empty slug (e.g. all special chars)
   if (!baseSlug) baseSlug = `project-${randomUUID().slice(0, 8)}`;
 
-  const slug = await ensureUniqueSlug(baseSlug);
+  const slug = await ensureUniqueSlug(baseSlug, workspaceId);
   const id = randomUUID();
 
   const [created] = await db.transaction(async (tx) => {
