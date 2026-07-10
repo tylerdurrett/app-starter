@@ -1,9 +1,9 @@
 import { createFileRoute, getRouteApi } from '@tanstack/react-router';
 import { Card, CardContent, CardHeader, CardTitle } from '@repo/ui';
 
-const projectRoute = getRouteApi('/_app/p/$projectSlug');
+const projectRoute = getRouteApi('/_app/w/$workspaceSlug/p/$projectSlug');
 
-export const Route = createFileRoute('/_app/p/$projectSlug/')({
+export const Route = createFileRoute('/_app/w/$workspaceSlug/p/$projectSlug/')({
   component: ProjectDashboardPage,
 });
 

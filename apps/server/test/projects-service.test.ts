@@ -37,6 +37,9 @@ import {
   acceptInvite,
 } from '../src/projects/invites.js';
 
+import { requireProjectPermission } from '../src/auth/require-permission.js';
+import type { FastifyRequest } from 'fastify';
+
 // ---- helpers ----
 
 let app: FastifyInstance;
@@ -44,7 +47,7 @@ let aliceId: string;
 let bobId: string;
 let bobEmail: string;
 let workspaceId: string;
-let _workspaceSlug: string;
+let workspaceSlug: string;
 const createdProjectIds: string[] = [];
 const createdWorkspaceIds: string[] = [];
 
@@ -115,7 +118,7 @@ beforeAll(async () => {
   // Projects live under a workspace; create one shared parent workspace for this file.
   const parent = await createAndTrackWorkspace('Projects Test Parent', aliceId);
   workspaceId = parent.id;
-  _workspaceSlug = parent.slug;
+  workspaceSlug = parent.slug;
 });
 
 afterAll(async () => {
@@ -314,21 +317,21 @@ describe('listAccessibleProjectsForUser', () => {
 describe('getProjectBySlug', () => {
   it('returns project and role for a direct member', async () => {
     const proj = await createAndTrack('Get Proj', aliceId);
-    const result = await getProjectBySlug(proj.slug, aliceId);
+    const result = await getProjectBySlug(proj.slug, aliceId, workspaceSlug);
 
     expect(result.project.id).toBe(proj.id);
     expect(result.role).toBe('owner');
   });
 
   it('throws NOT_FOUND for non-existent slug', async () => {
-    await expect(getProjectBySlug('no-such-proj', aliceId)).rejects.toMatchObject({
+    await expect(getProjectBySlug('no-such-proj', aliceId, workspaceSlug)).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
   });
 
   it('throws NOT_FOUND for user with neither project nor workspace access', async () => {
     const proj = await createAndTrack('No Bob Proj', aliceId);
-    await expect(getProjectBySlug(proj.slug, bobId)).rejects.toMatchObject({
+    await expect(getProjectBySlug(proj.slug, bobId, workspaceSlug)).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
   });
@@ -337,7 +340,7 @@ describe('getProjectBySlug', () => {
 describe('updateProject', () => {
   it('owner can update name', async () => {
     const proj = await createAndTrack('Before Update', aliceId);
-    const updated = await updateProject(proj.slug, aliceId, { name: 'After Update' });
+    const updated = await updateProject(proj.slug, aliceId, { name: 'After Update' }, workspaceSlug);
 
     expect(updated.name).toBe('After Update');
     expect(updated.slug).toBe(proj.slug); // slug does not change
@@ -347,7 +350,9 @@ describe('updateProject', () => {
     const proj = await createAndTrack('Member Update Proj', aliceId);
     await addProjectMember(proj.id, bobId, 'member');
 
-    await expect(updateProject(proj.slug, bobId, { name: 'Nope' })).rejects.toMatchObject({
+    await expect(
+      updateProject(proj.slug, bobId, { name: 'Nope' }, workspaceSlug),
+    ).rejects.toMatchObject({
       code: 'FORBIDDEN',
     });
   });
@@ -356,7 +361,12 @@ describe('updateProject', () => {
     const proj = await createAndTrack('Manager Update Proj', aliceId);
     await addProjectMember(proj.id, bobId, 'manager');
 
-    const updated = await updateProject(proj.slug, bobId, { name: 'Manager Updated' });
+    const updated = await updateProject(
+      proj.slug,
+      bobId,
+      { name: 'Manager Updated' },
+      workspaceSlug,
+    );
     expect(updated.name).toBe('Manager Updated');
   });
 });
@@ -364,7 +374,7 @@ describe('updateProject', () => {
 describe('deleteProject', () => {
   it('owner can delete with correct confirmation', async () => {
     const proj = await createAndTrack('Delete Me Proj', aliceId);
-    await deleteProject(proj.slug, aliceId, { confirmation: `Delete ${proj.name}` });
+    await deleteProject(proj.slug, aliceId, { confirmation: `Delete ${proj.name}` }, workspaceSlug);
 
     const [gone] = await db.select().from(projects).where(eq(projects.id, proj.id));
     expect(gone).toBeUndefined();
@@ -373,7 +383,7 @@ describe('deleteProject', () => {
   it('rejects incorrect confirmation', async () => {
     const proj = await createAndTrack('Keep Me Proj', aliceId);
     await expect(
-      deleteProject(proj.slug, aliceId, { confirmation: 'wrong' }),
+      deleteProject(proj.slug, aliceId, { confirmation: 'wrong' }, workspaceSlug),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
   });
 
@@ -382,15 +392,15 @@ describe('deleteProject', () => {
     await addProjectMember(proj.id, bobId, 'manager');
 
     await expect(
-      deleteProject(proj.slug, bobId, { confirmation: `Delete ${proj.name}` }),
+      deleteProject(proj.slug, bobId, { confirmation: `Delete ${proj.name}` }, workspaceSlug),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
   it('cascade deletes memberships and invites', async () => {
     const proj = await createAndTrack('Cascade Proj', aliceId);
-    await createInvite(proj.slug, aliceId, { email: 'cascade-proj@test.com' });
+    await createInvite(proj.slug, aliceId, { email: 'cascade-proj@test.com' }, workspaceSlug);
 
-    await deleteProject(proj.slug, aliceId, { confirmation: `Delete ${proj.name}` });
+    await deleteProject(proj.slug, aliceId, { confirmation: `Delete ${proj.name}` }, workspaceSlug);
 
     const memberships = await db
       .select()
@@ -409,7 +419,7 @@ describe('deleteProject', () => {
 describe('listMembers', () => {
   it('owner can list members', async () => {
     const proj = await createAndTrack('Members List Proj', aliceId);
-    const members = await listMembers(proj.slug, aliceId);
+    const members = await listMembers(proj.slug, aliceId, workspaceSlug);
 
     expect(members).toHaveLength(1);
     expect(members[0].userId).toBe(aliceId);
@@ -420,7 +430,7 @@ describe('listMembers', () => {
     const proj = await createAndTrack('Members List Mem Proj', aliceId);
     await addProjectMember(proj.id, bobId, 'member');
 
-    const members = await listMembers(proj.slug, bobId);
+    const members = await listMembers(proj.slug, bobId, workspaceSlug);
     expect(members).toHaveLength(2);
   });
 
@@ -429,7 +439,9 @@ describe('listMembers', () => {
     const outsideWs = await createAndTrackWorkspace('Outside Ws', aliceId);
     const proj = await createAndTrack('Outside Proj', aliceId, { wsId: outsideWs.id });
 
-    await expect(listMembers(proj.slug, bobId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(listMembers(proj.slug, bobId, outsideWs.slug)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
   });
 });
 
@@ -438,16 +450,16 @@ describe('removeMember', () => {
     const proj = await createAndTrack('Remove Test Proj', aliceId);
     await addProjectMember(proj.id, bobId, 'member');
 
-    await removeMember(proj.slug, aliceId, bobId);
+    await removeMember(proj.slug, aliceId, bobId, workspaceSlug);
 
-    const members = await listMembers(proj.slug, aliceId);
+    const members = await listMembers(proj.slug, aliceId, workspaceSlug);
     expect(members).toHaveLength(1);
     expect(members[0].userId).toBe(aliceId);
   });
 
   it('cannot self-remove (CONFLICT)', async () => {
     const proj = await createAndTrack('Self Remove Proj', aliceId);
-    await expect(removeMember(proj.slug, aliceId, aliceId)).rejects.toMatchObject({
+    await expect(removeMember(proj.slug, aliceId, aliceId, workspaceSlug)).rejects.toMatchObject({
       code: 'CONFLICT',
     });
   });
@@ -456,16 +468,102 @@ describe('removeMember', () => {
     const proj = await createAndTrack('Member Remove Forbid Proj', aliceId);
     await addProjectMember(proj.id, bobId, 'member');
 
-    await expect(removeMember(proj.slug, bobId, aliceId)).rejects.toMatchObject({
+    await expect(removeMember(proj.slug, bobId, aliceId, workspaceSlug)).rejects.toMatchObject({
       code: 'FORBIDDEN',
     });
   });
 
   it('removing non-existent member throws NOT_FOUND', async () => {
     const proj = await createAndTrack('Remove Ghost Proj', aliceId);
-    await expect(removeMember(proj.slug, aliceId, 'no-such-user')).rejects.toMatchObject({
+    await expect(
+      removeMember(proj.slug, aliceId, 'no-such-user', workspaceSlug),
+    ).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
+  });
+});
+
+describe('workspace-scoped slug threading through service wrappers', () => {
+  it('getProjectBySlug resolves each duplicate-slug project under its own workspace', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Composite Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Composite Ws B', aliceId);
+    const projA = await createAndTrack('Svc Shared Slug', aliceId, { wsId: wsA.id });
+    const projB = await createAndTrack('Svc Shared Slug', aliceId, { wsId: wsB.id });
+    expect(projA.slug).toBe(projB.slug);
+
+    const resA = await getProjectBySlug(projA.slug, aliceId, wsA.slug);
+    const resB = await getProjectBySlug(projB.slug, aliceId, wsB.slug);
+
+    expect(resA.project.id).toBe(projA.id);
+    expect(resB.project.id).toBe(projB.id);
+  });
+
+  it('getProjectBySlug returns NOT_FOUND when the slug lives only in another workspace', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Wrong Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Wrong Ws B', aliceId);
+    const proj = await createAndTrack('Svc Only In A', aliceId, { wsId: wsA.id });
+
+    await expect(getProjectBySlug(proj.slug, aliceId, wsB.slug)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+  });
+
+  it('updateProject targets the project in the given workspace', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Update Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Update Ws B', aliceId);
+    const projA = await createAndTrack('Svc Update Shared', aliceId, { wsId: wsA.id });
+    const projB = await createAndTrack('Svc Update Shared', aliceId, { wsId: wsB.id });
+
+    const updated = await updateProject(projB.slug, aliceId, { name: 'Renamed In B' }, wsB.slug);
+    expect(updated.id).toBe(projB.id);
+    expect(updated.name).toBe('Renamed In B');
+
+    const [aStill] = await db.select().from(projects).where(eq(projects.id, projA.id));
+    expect(aStill.name).toBe('Svc Update Shared');
+  });
+
+  it('deleteProject deletes the project in the given workspace only', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Delete Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Delete Ws B', aliceId);
+    const projA = await createAndTrack('Svc Delete Shared', aliceId, { wsId: wsA.id });
+    const projB = await createAndTrack('Svc Delete Shared', aliceId, { wsId: wsB.id });
+
+    await deleteProject(projB.slug, aliceId, { confirmation: `Delete ${projB.name}` }, wsB.slug);
+
+    const [bGone] = await db.select().from(projects).where(eq(projects.id, projB.id));
+    const [aStill] = await db.select().from(projects).where(eq(projects.id, projA.id));
+    expect(bGone).toBeUndefined();
+    expect(aStill.id).toBe(projA.id);
+  });
+
+  it('listMembers resolves the project in the given workspace', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Members Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Members Ws B', aliceId);
+    const projA = await createAndTrack('Svc Members Shared', aliceId, { wsId: wsA.id });
+    const projB = await createAndTrack('Svc Members Shared', aliceId, { wsId: wsB.id });
+    await addProjectMember(projB.id, bobId, 'member');
+
+    const membersB = await listMembers(projB.slug, aliceId, wsB.slug);
+    const membersA = await listMembers(projA.slug, aliceId, wsA.slug);
+
+    expect(membersB.map((m) => m.userId).sort()).toEqual([aliceId, bobId].sort());
+    expect(membersA.map((m) => m.userId)).toEqual([aliceId]);
+  });
+
+  it('removeMember resolves the project in the given workspace', async () => {
+    const wsA = await createAndTrackWorkspace('Svc Remove Ws A', aliceId);
+    const wsB = await createAndTrackWorkspace('Svc Remove Ws B', aliceId);
+    const projA = await createAndTrack('Svc Remove Shared', aliceId, { wsId: wsA.id });
+    const projB = await createAndTrack('Svc Remove Shared', aliceId, { wsId: wsB.id });
+    await addProjectMember(projA.id, bobId, 'member');
+    await addProjectMember(projB.id, bobId, 'member');
+
+    await removeMember(projB.slug, aliceId, bobId, wsB.slug);
+
+    const membersB = await listMembers(projB.slug, aliceId, wsB.slug);
+    const membersA = await listMembers(projA.slug, aliceId, wsA.slug);
+    expect(membersB.map((m) => m.userId)).toEqual([aliceId]);
+    expect(membersA.map((m) => m.userId).sort()).toEqual([aliceId, bobId].sort());
   });
 });
 
@@ -495,7 +593,7 @@ describe('last active project', () => {
     const proj = await createAndTrack('Last Active Delete', aliceId);
     await setLastActiveProject(aliceId, proj.id);
 
-    await deleteProject(proj.slug, aliceId, { confirmation: `Delete ${proj.name}` });
+    await deleteProject(proj.slug, aliceId, { confirmation: `Delete ${proj.name}` }, workspaceSlug);
     const result = await getLastActiveProject(aliceId);
     expect(result).toBeNull();
   });
@@ -505,9 +603,14 @@ describe('invites', () => {
   describe('createInvite', () => {
     it('owner can create invite with default member role', async () => {
       const proj = await createAndTrack('Invite Create Proj', aliceId);
-      const { invite, token } = await createInvite(proj.slug, aliceId, {
-        email: 'invitee-p@test.com',
-      });
+      const { invite, token } = await createInvite(
+        proj.slug,
+        aliceId,
+        {
+          email: 'invitee-p@test.com',
+        },
+        workspaceSlug,
+      );
 
       expect(invite.email).toBe('invitee-p@test.com');
       expect(invite.status).toBe('pending');
@@ -518,19 +621,29 @@ describe('invites', () => {
 
     it('accepts manager role on invite creation', async () => {
       const proj = await createAndTrack('Invite Manager Role', aliceId);
-      const { invite } = await createInvite(proj.slug, aliceId, {
-        email: 'manager-p@test.com',
-        role: 'manager',
-      });
+      const { invite } = await createInvite(
+        proj.slug,
+        aliceId,
+        {
+          email: 'manager-p@test.com',
+          role: 'manager',
+        },
+        workspaceSlug,
+      );
 
       expect(invite.role).toBe('manager');
     });
 
     it('normalizes email to lowercase', async () => {
       const proj = await createAndTrack('Invite Normalize Proj', aliceId);
-      const { invite } = await createInvite(proj.slug, aliceId, {
-        email: '  UPPER@Test.COM  ',
-      });
+      const { invite } = await createInvite(
+        proj.slug,
+        aliceId,
+        {
+          email: '  UPPER@Test.COM  ',
+        },
+        workspaceSlug,
+      );
 
       expect(invite.email).toBe('upper@test.com');
     });
@@ -542,17 +655,19 @@ describe('invites', () => {
         .from(users)
         .where(eq(users.id, aliceId));
 
-      await expect(createInvite(proj.slug, aliceId, { email: alice.email })).rejects.toMatchObject({
+      await expect(
+        createInvite(proj.slug, aliceId, { email: alice.email }, workspaceSlug),
+      ).rejects.toMatchObject({
         code: 'CONFLICT',
       });
     });
 
     it('rejects if pending invite already exists', async () => {
       const proj = await createAndTrack('Invite Dup Proj', aliceId);
-      await createInvite(proj.slug, aliceId, { email: 'dup-p@test.com' });
+      await createInvite(proj.slug, aliceId, { email: 'dup-p@test.com' }, workspaceSlug);
 
       await expect(
-        createInvite(proj.slug, aliceId, { email: 'dup-p@test.com' }),
+        createInvite(proj.slug, aliceId, { email: 'dup-p@test.com' }, workspaceSlug),
       ).rejects.toMatchObject({ code: 'CONFLICT' });
     });
 
@@ -561,7 +676,7 @@ describe('invites', () => {
       await addProjectMember(proj.id, bobId, 'member');
 
       await expect(
-        createInvite(proj.slug, bobId, { email: 'someone-p@test.com' }),
+        createInvite(proj.slug, bobId, { email: 'someone-p@test.com' }, workspaceSlug),
       ).rejects.toMatchObject({ code: 'FORBIDDEN' });
     });
 
@@ -569,9 +684,14 @@ describe('invites', () => {
       const proj = await createAndTrack('Invite Manager Create', aliceId);
       await addProjectMember(proj.id, bobId, 'manager');
 
-      const { invite } = await createInvite(proj.slug, bobId, {
-        email: 'mgr-created@test.com',
-      });
+      const { invite } = await createInvite(
+        proj.slug,
+        bobId,
+        {
+          email: 'mgr-created@test.com',
+        },
+        workspaceSlug,
+      );
       expect(invite.email).toBe('mgr-created@test.com');
     });
   });
@@ -579,9 +699,9 @@ describe('invites', () => {
   describe('listInvites', () => {
     it('returns pending invites with inviter name', async () => {
       const proj = await createAndTrack('Invite List Proj', aliceId);
-      await createInvite(proj.slug, aliceId, { email: 'list-p@test.com' });
+      await createInvite(proj.slug, aliceId, { email: 'list-p@test.com' }, workspaceSlug);
 
-      const list = await listInvites(proj.slug, aliceId);
+      const list = await listInvites(proj.slug, aliceId, workspaceSlug);
       expect(list.length).toBeGreaterThanOrEqual(1);
       const found = list.find((i) => i.email === 'list-p@test.com');
       expect(found).toBeDefined();
@@ -592,27 +712,39 @@ describe('invites', () => {
       const outsideWs = await createAndTrackWorkspace('List NonMem Ws', aliceId);
       const proj = await createAndTrack('Invite List NonMem Proj', aliceId, { wsId: outsideWs.id });
 
-      await expect(listInvites(proj.slug, bobId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      await expect(listInvites(proj.slug, bobId, outsideWs.slug)).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
     });
   });
 
   describe('revokeInvite', () => {
     it('owner can revoke a pending invite', async () => {
       const proj = await createAndTrack('Invite Revoke Proj', aliceId);
-      const { invite } = await createInvite(proj.slug, aliceId, { email: 'revoke-p@test.com' });
+      const { invite } = await createInvite(
+        proj.slug,
+        aliceId,
+        { email: 'revoke-p@test.com' },
+        workspaceSlug,
+      );
 
-      await revokeInvite(proj.slug, aliceId, invite.id);
+      await revokeInvite(proj.slug, aliceId, invite.id, workspaceSlug);
 
-      const list = await listInvites(proj.slug, aliceId);
+      const list = await listInvites(proj.slug, aliceId, workspaceSlug);
       expect(list.find((i) => i.id === invite.id)).toBeUndefined();
     });
 
     it('member cannot revoke (FORBIDDEN)', async () => {
       const proj = await createAndTrack('Invite Revoke Forbid Proj', aliceId);
       await addProjectMember(proj.id, bobId, 'member');
-      const { invite } = await createInvite(proj.slug, aliceId, { email: 'revforbid-p@test.com' });
+      const { invite } = await createInvite(
+        proj.slug,
+        aliceId,
+        { email: 'revforbid-p@test.com' },
+        workspaceSlug,
+      );
 
-      await expect(revokeInvite(proj.slug, bobId, invite.id)).rejects.toMatchObject({
+      await expect(revokeInvite(proj.slug, bobId, invite.id, workspaceSlug)).rejects.toMatchObject({
         code: 'FORBIDDEN',
       });
     });
@@ -621,7 +753,12 @@ describe('invites', () => {
   describe('getInviteByToken', () => {
     it('returns invite summary for a valid pending token', async () => {
       const proj = await createAndTrack('Token Lookup Proj', aliceId);
-      const { token } = await createInvite(proj.slug, aliceId, { email: 'token-p@test.com' });
+      const { token } = await createInvite(
+        proj.slug,
+        aliceId,
+        { email: 'token-p@test.com' },
+        workspaceSlug,
+      );
 
       const summary = await getInviteByToken(token);
       expect(summary.email).toBe('token-p@test.com');
@@ -637,11 +774,16 @@ describe('invites', () => {
 
     it('returns metadata with status=revoked for a revoked invite (landing page needs an explicit state)', async () => {
       const proj = await createAndTrack('Token Revoked Proj', aliceId);
-      const { token, invite } = await createInvite(proj.slug, aliceId, {
-        email: 'revtoken@test.com',
-      });
+      const { token, invite } = await createInvite(
+        proj.slug,
+        aliceId,
+        {
+          email: 'revtoken@test.com',
+        },
+        workspaceSlug,
+      );
 
-      await revokeInvite(proj.slug, aliceId, invite.id);
+      await revokeInvite(proj.slug, aliceId, invite.id, workspaceSlug);
       const summary = await getInviteByToken(token);
       expect(summary.status).toBe('revoked');
       expect(summary.projectName).toBe('Token Revoked Proj');
@@ -649,9 +791,14 @@ describe('invites', () => {
 
     it('returns metadata with past expiresAt for an expired invite', async () => {
       const proj = await createAndTrack('Token Expired Proj', aliceId);
-      const { token, invite } = await createInvite(proj.slug, aliceId, {
-        email: 'exptoken@test.com',
-      });
+      const { token, invite } = await createInvite(
+        proj.slug,
+        aliceId,
+        {
+          email: 'exptoken@test.com',
+        },
+        workspaceSlug,
+      );
 
       await db
         .update(projectInvites)
@@ -667,12 +814,17 @@ describe('invites', () => {
   describe('acceptInvite', () => {
     it('correct email user can accept and gets membership', async () => {
       const proj = await createAndTrack('Accept Test Proj', aliceId);
-      const { token } = await createInvite(proj.slug, aliceId, { email: bobEmail });
+      const { token } = await createInvite(
+        proj.slug,
+        aliceId,
+        { email: bobEmail },
+        workspaceSlug,
+      );
 
       const result = await acceptInvite(token, bobId);
       expect(result.projectSlug).toBe(proj.slug);
 
-      const members = await listMembers(proj.slug, aliceId);
+      const members = await listMembers(proj.slug, aliceId, workspaceSlug);
       const bobMember = members.find((m) => m.userId === bobId);
       expect(bobMember).toBeDefined();
       expect(bobMember!.role).toBe('member');
@@ -687,21 +839,31 @@ describe('invites', () => {
       const carolEmail = `carol-accept-mgr-${ts}@test.com`;
       const carolId = await signUp(carolEmail, 'Carol');
 
-      const { token } = await createInvite(proj.slug, aliceId, {
-        email: carolEmail,
-        role: 'manager',
-      });
+      const { token } = await createInvite(
+        proj.slug,
+        aliceId,
+        {
+          email: carolEmail,
+          role: 'manager',
+        },
+        workspaceSlug,
+      );
 
       await acceptInvite(token, carolId);
 
-      const members = await listMembers(proj.slug, aliceId);
+      const members = await listMembers(proj.slug, aliceId, workspaceSlug);
       const carolMember = members.find((m) => m.userId === carolId);
       expect(carolMember?.role).toBe('manager');
     });
 
     it('mismatched email throws FORBIDDEN', async () => {
       const proj = await createAndTrack('Accept Mismatch Proj', aliceId);
-      const { token } = await createInvite(proj.slug, aliceId, { email: 'stranger-p@test.com' });
+      const { token } = await createInvite(
+        proj.slug,
+        aliceId,
+        { email: 'stranger-p@test.com' },
+        workspaceSlug,
+      );
 
       await expect(acceptInvite(token, bobId)).rejects.toMatchObject({
         code: 'FORBIDDEN',
@@ -710,7 +872,12 @@ describe('invites', () => {
 
     it('accepting already-accepted invite throws CONFLICT', async () => {
       const proj = await createAndTrack('Accept Twice Proj', aliceId);
-      const { token } = await createInvite(proj.slug, aliceId, { email: bobEmail });
+      const { token } = await createInvite(
+        proj.slug,
+        aliceId,
+        { email: bobEmail },
+        workspaceSlug,
+      );
 
       await acceptInvite(token, bobId);
       await expect(acceptInvite(token, bobId)).rejects.toMatchObject({
@@ -720,9 +887,14 @@ describe('invites', () => {
 
     it('accepting revoked invite throws CONFLICT', async () => {
       const proj = await createAndTrack('Accept Revoked Proj', aliceId);
-      const { token, invite } = await createInvite(proj.slug, aliceId, { email: bobEmail });
+      const { token, invite } = await createInvite(
+        proj.slug,
+        aliceId,
+        { email: bobEmail },
+        workspaceSlug,
+      );
 
-      await revokeInvite(proj.slug, aliceId, invite.id);
+      await revokeInvite(proj.slug, aliceId, invite.id, workspaceSlug);
       await expect(acceptInvite(token, bobId)).rejects.toMatchObject({
         code: 'CONFLICT',
       });
@@ -730,7 +902,12 @@ describe('invites', () => {
 
     it('accepting expired invite throws CONFLICT', async () => {
       const proj = await createAndTrack('Accept Expired Proj', aliceId);
-      const { token, invite } = await createInvite(proj.slug, aliceId, { email: bobEmail });
+      const { token, invite } = await createInvite(
+        proj.slug,
+        aliceId,
+        { email: bobEmail },
+        workspaceSlug,
+      );
 
       await db
         .update(projectInvites)
@@ -741,5 +918,126 @@ describe('invites', () => {
         code: 'CONFLICT',
       });
     });
+  });
+
+  describe('workspace-scoped resolution', () => {
+    it('createInvite with a non-matching workspaceSlug resolves NOT_FOUND', async () => {
+      const wsA = await createAndTrackWorkspace('Inv Cross Ws A', aliceId);
+      const wsB = await createAndTrackWorkspace('Inv Cross Ws B', aliceId);
+      // Distinct names → distinct slugs, so projA's slug is genuinely absent from wsB.
+      const projA = await createAndTrack('Inv Cross A Only', aliceId, { wsId: wsA.id });
+      await createAndTrack('Inv Cross B Only', aliceId, { wsId: wsB.id });
+
+      // projA.slug lives in wsA; resolving it under wsB must not find a row.
+      await expect(
+        createInvite(projA.slug, aliceId, { email: 'crossinv@test.com' }, wsB.slug),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    });
+
+    it('createInvite with the matching workspaceSlug resolves the correct project', async () => {
+      const wsA = await createAndTrackWorkspace('Inv Match Ws A', aliceId);
+      const wsB = await createAndTrackWorkspace('Inv Match Ws B', aliceId);
+      const projA = await createAndTrack('Inv Match Shared', aliceId, { wsId: wsA.id });
+      const projB = await createAndTrack('Inv Match Shared', aliceId, { wsId: wsB.id });
+
+      const { invite } = await createInvite(
+        projB.slug,
+        aliceId,
+        { email: 'matchinv@test.com' },
+        wsB.slug,
+      );
+      expect(invite.email).toBe('matchinv@test.com');
+      // The invite must attach to the wsB project, not the same-slug wsA project.
+      expect(invite.projectId).toBe(projB.id);
+      expect(invite.projectId).not.toBe(projA.id);
+    });
+
+    it('createInvite preserves FORBIDDEN semantics when threaded with a workspaceSlug', async () => {
+      const ws = await createAndTrackWorkspace('Inv Forbid Ws', aliceId);
+      const proj = await createAndTrack('Inv Forbid Threaded', aliceId, { wsId: ws.id });
+      await addProjectMember(proj.id, bobId, 'member');
+
+      await expect(
+        createInvite(proj.slug, bobId, { email: 'nope@test.com' }, ws.slug),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+
+    it('listInvites resolves the project in the given workspace', async () => {
+      const wsA = await createAndTrackWorkspace('Inv List Ws A', aliceId);
+      const wsB = await createAndTrackWorkspace('Inv List Ws B', aliceId);
+      // Distinct names so projA's slug is absent from wsB and the NOT_FOUND is real.
+      const projA = await createAndTrack('Inv List A Only', aliceId, { wsId: wsA.id });
+      const projB = await createAndTrack('Inv List B Only', aliceId, { wsId: wsB.id });
+      await createInvite(projA.slug, aliceId, { email: 'ina-list@test.com' }, wsA.slug);
+      await createInvite(projB.slug, aliceId, { email: 'inb-list@test.com' }, wsB.slug);
+
+      const listB = await listInvites(projB.slug, aliceId, wsB.slug);
+      expect(listB.map((i) => i.email)).toContain('inb-list@test.com');
+      expect(listB.map((i) => i.email)).not.toContain('ina-list@test.com');
+
+      // A slug that does not live in the named workspace resolves NOT_FOUND.
+      await expect(
+        listInvites(projA.slug, aliceId, wsB.slug),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    });
+
+    it('revokeInvite with a non-matching workspaceSlug resolves NOT_FOUND', async () => {
+      const wsA = await createAndTrackWorkspace('Inv Revoke Ws A', aliceId);
+      const wsB = await createAndTrackWorkspace('Inv Revoke Ws B', aliceId);
+      // Distinct names so the NOT_FOUND comes from the (workspace, slug) project
+      // lookup rather than falling through to the invite lookup.
+      const projA = await createAndTrack('Inv Revoke A Only', aliceId, { wsId: wsA.id });
+      await createAndTrack('Inv Revoke B Only', aliceId, { wsId: wsB.id });
+      const { invite } = await createInvite(
+        projA.slug,
+        aliceId,
+        { email: 'revcross@test.com' },
+        wsA.slug,
+      );
+
+      await expect(
+        revokeInvite(projA.slug, aliceId, invite.id, wsB.slug),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+      // The invite is untouched and still pending under the correct workspace.
+      const list = await listInvites(projA.slug, aliceId, wsA.slug);
+      expect(list.find((i) => i.id === invite.id)).toBeDefined();
+    });
+  });
+});
+
+describe('requireProjectPermission workspace threading', () => {
+  it('carries workspaceSlug to the resolver, selecting the same-slug project in the named workspace', async () => {
+    const ts = Date.now();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/auth/sign-up/email',
+      headers: { 'content-type': 'application/json' },
+      payload: { email: `guard-${ts}@test.com`, password: 'password123', name: 'Guard' },
+    });
+    const guardId = JSON.parse(res.body).user.id;
+    const cookie = (res.headers['set-cookie'] as string).split(';')[0];
+    const req = { headers: { cookie } } as unknown as FastifyRequest;
+
+    const wsA = await createAndTrackWorkspace('Guard Ws A', guardId);
+    const wsB = await createAndTrackWorkspace('Guard Ws B', guardId);
+    const projA = await createAndTrack('Guard Shared', guardId, { wsId: wsA.id });
+    const projB = await createAndTrack('Guard Shared', guardId, { wsId: wsB.id });
+
+    const resolved = await requireProjectPermission(req, projB.slug, 'project:read', wsB.slug);
+    expect(resolved.project.id).toBe(projB.id);
+    expect(resolved.project.id).not.toBe(projA.id);
+
+    // A slug not present in the named workspace surfaces as NOT_FOUND (404 semantics).
+    await expect(
+      requireProjectPermission(req, projB.slug, 'project:read', 'no-such-workspace'),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('still throws 401 when unauthenticated (semantics unchanged)', async () => {
+    const req = { headers: {} } as unknown as FastifyRequest;
+    await expect(
+      requireProjectPermission(req, 'any-slug', 'project:read', 'any-ws'),
+    ).rejects.toMatchObject({ statusCode: 401 });
   });
 });

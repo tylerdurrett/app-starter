@@ -1,5 +1,5 @@
 import { db, projects } from '@repo/db';
-import { like } from 'drizzle-orm';
+import { and, eq, like } from 'drizzle-orm';
 
 /** Convert a project name into a URL-safe slug. */
 export function slugify(name: string): string {
@@ -13,14 +13,15 @@ export function slugify(name: string): string {
 }
 
 /**
- * Return a slug guaranteed to be unique in the projects table.
- * If `baseSlug` is taken, appends `-2`, `-3`, etc.
+ * Return a slug guaranteed to be unique within the given workspace.
+ * If `baseSlug` is taken by another project in the same workspace, appends
+ * `-2`, `-3`, etc. Slugs in other workspaces are ignored.
  */
-export async function ensureUniqueSlug(baseSlug: string): Promise<string> {
+export async function ensureUniqueSlug(baseSlug: string, workspaceId: string): Promise<string> {
   const existing = await db
     .select({ slug: projects.slug })
     .from(projects)
-    .where(like(projects.slug, `${baseSlug}%`));
+    .where(and(eq(projects.workspaceId, workspaceId), like(projects.slug, `${baseSlug}%`)));
 
   const taken = new Set(existing.map((r) => r.slug));
 

@@ -106,7 +106,7 @@ describe('post-signup hook', () => {
     expect(projectList[0].name).toBe('Personal');
   });
 
-  it('generates unique slugs for both workspaces and projects for same-name users', async () => {
+  it('deduplicates workspace slugs globally but keeps project slugs clean per workspace for same-name users', async () => {
     const ts = Date.now();
     const id1 = await signUp(`postsignup-dup1-${ts}@test.com`, 'Charlie');
     const id2 = await signUp(`postsignup-dup2-${ts}@test.com`, 'Charlie');
@@ -114,6 +114,7 @@ describe('post-signup hook', () => {
     const workspaceList1 = await listWorkspacesForUser(id1);
     const workspaceList2 = await listWorkspacesForUser(id2);
 
+    // Workspaces stay globally unique.
     expect(workspaceList1[0].slug).not.toBe(workspaceList2[0].slug);
     // One gets "charlies-workspace", the other gets "charlies-workspace-N"
     const wslugs = [workspaceList1[0].slug, workspaceList2[0].slug].sort();
@@ -123,11 +124,10 @@ describe('post-signup hook', () => {
     const projectList1 = await listProjectsForUser(id1);
     const projectList2 = await listProjectsForUser(id2);
 
-    expect(projectList1[0].slug).not.toBe(projectList2[0].slug);
-    // One gets "personal", the other gets "personal-N"
-    const pslugs = [projectList1[0].slug, projectList2[0].slug].sort();
-    expect(pslugs[0]).toMatch(/^personal/);
-    expect(pslugs[1]).toMatch(/^personal-\d+/);
+    // Project slugs are unique only within a workspace, so each user's
+    // "Personal" project — living in its own workspace — keeps the clean slug.
+    expect(projectList1[0].slug).toBe('personal');
+    expect(projectList2[0].slug).toBe('personal');
   });
 
   it('each user has owner role on both workspace and project', async () => {

@@ -29,9 +29,15 @@ export class ServiceError extends Error {
 export async function resolveProjectAndRole(
   slug: string,
   actorUserId: string,
-  requiredPermission?: ProjectPermission,
+  requiredPermission: ProjectPermission | undefined,
+  workspaceSlug: string,
 ): Promise<{ project: typeof projects.$inferSelect; role: ProjectRole }> {
-  const result = await resolveProjectWithOverride(slug, actorUserId, requiredPermission);
+  const result = await resolveProjectWithOverride(
+    slug,
+    actorUserId,
+    requiredPermission,
+    workspaceSlug,
+  );
   return { project: result.project, role: result.role };
 }
 
@@ -44,25 +50,64 @@ export async function createProject({
   workspaceId: string;
   ownerUserId: string;
 }) {
-  let baseSlug = slugify(name);
-  // Fallback for names that produce an empty slug (e.g. all special chars)
-  if (!baseSlug) baseSlug = `project-${randomUUID().slice(0, 8)}`;
+  // Retry to close the check-then-insert race: ensureUniqueSlug runs in a
+  // SELECT separate from the INSERT, so two concurrent creations in the same
+  // workspace can compute the same suffix and collide on the
+  // (workspace_id, slug) unique constraint. On that specific violation we
+  // recompute the slug (a fresh SELECT now sees the winner's row) and retry.
+  const MAX_ATTEMPTS = 5;
+  let lastError: unknown;
 
-  const slug = await ensureUniqueSlug(baseSlug);
-  const id = randomUUID();
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    let baseSlug = slugify(name);
+    // Fallback for names that produce an empty slug (e.g. all special chars)
+    if (!baseSlug) baseSlug = `project-${randomUUID().slice(0, 8)}`;
 
-  const [created] = await db.transaction(async (tx) => {
-    const rows = await tx.insert(projects).values({ id, name, slug, workspaceId }).returning();
-    await tx.insert(projectMemberships).values({
-      id: randomUUID(),
-      projectId: id,
-      userId: ownerUserId,
-      role: 'owner',
-    });
-    return rows;
-  });
+    const slug = await ensureUniqueSlug(baseSlug, workspaceId);
+    const id = randomUUID();
 
-  return created;
+    try {
+      const [created] = await db.transaction(async (tx) => {
+        const rows = await tx.insert(projects).values({ id, name, slug, workspaceId }).returning();
+        await tx.insert(projectMemberships).values({
+          id: randomUUID(),
+          projectId: id,
+          userId: ownerUserId,
+          role: 'owner',
+        });
+        return rows;
+      });
+
+      return created;
+    } catch (err) {
+      if (isSlugUniqueViolation(err)) {
+        lastError = err;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastError;
+}
+
+/**
+ * True only for the projects (workspace_id, slug) unique violation — the race
+ * we retry. Any other error (including the projectMemberships insert) must not
+ * be swallowed. Drizzle wraps the driver error in a DrizzleQueryError, so the
+ * postgres.js fields (code, constraint_name) live on the `cause` chain, not the
+ * top-level error.
+ */
+function isSlugUniqueViolation(err: unknown): boolean {
+  let current: unknown = err;
+  while (typeof current === 'object' && current !== null) {
+    const e = current as { code?: unknown; constraint_name?: unknown; cause?: unknown };
+    if (e.code === '23505' && e.constraint_name === 'projects_workspace_id_slug_unique') {
+      return true;
+    }
+    current = e.cause;
+  }
+  return false;
 }
 
 export async function listProjectsForUser(userId: string) {
@@ -72,6 +117,8 @@ export async function listProjectsForUser(userId: string) {
     .map(({ workspace, access: _access, ...project }) => ({
       ...project,
       workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
     }))
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
 }
@@ -197,16 +244,17 @@ export async function listAccessibleProjectsForUser(
     .map(({ workspaceCreatedAt: _workspaceCreatedAt, ...project }) => project);
 }
 
-export async function getProjectBySlug(slug: string, actorUserId: string) {
-  return resolveProjectAndRole(slug, actorUserId);
+export async function getProjectBySlug(slug: string, actorUserId: string, workspaceSlug: string) {
+  return resolveProjectAndRole(slug, actorUserId, undefined, workspaceSlug);
 }
 
 export async function updateProject(
   slug: string,
   actorUserId: string,
   { name }: { name?: string },
+  workspaceSlug: string,
 ) {
-  const { project } = await resolveProjectAndRole(slug, actorUserId, 'project:edit');
+  const { project } = await resolveProjectAndRole(slug, actorUserId, 'project:edit', workspaceSlug);
 
   const updateData: { updatedAt: Date; name?: string } = { updatedAt: new Date() };
   if (name !== undefined) updateData.name = name;
@@ -224,8 +272,14 @@ export async function deleteProject(
   slug: string,
   actorUserId: string,
   { confirmation }: { confirmation: string },
+  workspaceSlug: string,
 ) {
-  const { project } = await resolveProjectAndRole(slug, actorUserId, 'project:delete');
+  const { project } = await resolveProjectAndRole(
+    slug,
+    actorUserId,
+    'project:delete',
+    workspaceSlug,
+  );
 
   if (confirmation !== `Delete ${project.name}`) {
     throw new ServiceError('BAD_REQUEST', 'Confirmation text does not match');
@@ -234,8 +288,13 @@ export async function deleteProject(
   await db.delete(projects).where(eq(projects.id, project.id));
 }
 
-export async function listMembers(slug: string, actorUserId: string) {
-  const { project } = await resolveProjectAndRole(slug, actorUserId, 'project:members:list');
+export async function listMembers(slug: string, actorUserId: string, workspaceSlug: string) {
+  const { project } = await resolveProjectAndRole(
+    slug,
+    actorUserId,
+    'project:members:list',
+    workspaceSlug,
+  );
 
   return db
     .select({
@@ -250,8 +309,18 @@ export async function listMembers(slug: string, actorUserId: string) {
     .where(eq(projectMemberships.projectId, project.id));
 }
 
-export async function removeMember(slug: string, actorUserId: string, targetUserId: string) {
-  const { project } = await resolveProjectAndRole(slug, actorUserId, 'project:members:remove');
+export async function removeMember(
+  slug: string,
+  actorUserId: string,
+  targetUserId: string,
+  workspaceSlug: string,
+) {
+  const { project } = await resolveProjectAndRole(
+    slug,
+    actorUserId,
+    'project:members:remove',
+    workspaceSlug,
+  );
 
   if (targetUserId === actorUserId) {
     throw new ServiceError('CONFLICT', 'You cannot remove yourself from the project');
@@ -301,6 +370,8 @@ export async function getLastActiveProject(userId: string) {
       name: projects.name,
       slug: projects.slug,
       workspaceId: projects.workspaceId,
+      workspaceSlug: workspaces.slug,
+      workspaceName: workspaces.name,
       createdAt: projects.createdAt,
       updatedAt: projects.updatedAt,
       role: projectMemberships.role,
@@ -310,6 +381,7 @@ export async function getLastActiveProject(userId: string) {
       projectMemberships,
       and(eq(projectMemberships.projectId, projects.id), eq(projectMemberships.userId, userId)),
     )
+    .innerJoin(workspaces, eq(workspaces.id, projects.workspaceId))
     .where(eq(projects.id, user.lastActiveProjectId));
 
   return membership || null;

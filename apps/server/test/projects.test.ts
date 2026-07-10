@@ -204,7 +204,7 @@ describe('GET /api/projects', () => {
 
     const detailResponse = await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { cookie: bobCookie },
     });
     expect(detailResponse.statusCode).toBe(200);
@@ -242,7 +242,7 @@ describe('GET /api/projects/last-active', () => {
     // Fetch project by slug (sets lastActive)
     await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { cookie: aliceCookie },
     });
 
@@ -264,13 +264,28 @@ describe('GET /api/projects/:projectSlug', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { cookie: aliceCookie },
     });
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.id).toBe(project.id);
     expect(body.role).toBe('owner');
+  });
+
+  it('returns non-null workspaceSlug/workspaceName for a normal project', async () => {
+    const { body: workspace } = await createWorkspace(aliceCookie, 'Enriched Workspace');
+    const { body: project } = await createProject(aliceCookie, workspace.slug, 'Enriched Project');
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.workspaceSlug).toBe(workspace.slug);
+    expect(body.workspaceName).toBe(workspace.name);
   });
 
   it('workspace owner can access project via admin override', async () => {
@@ -283,7 +298,7 @@ describe('GET /api/projects/:projectSlug', () => {
     // Alice (workspace owner) can access Bob's project
     const res = await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { cookie: aliceCookie },
     });
     expect(res.statusCode).toBe(200);
@@ -303,7 +318,7 @@ describe('GET /api/projects/:projectSlug', () => {
     // Bob (workspace manager) can access Carol's project
     const res = await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { cookie: bobCookie },
     });
     expect(res.statusCode).toBe(200);
@@ -323,7 +338,7 @@ describe('GET /api/projects/:projectSlug', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { cookie: bobCookie },
     });
     expect(res.statusCode).toBe(200);
@@ -341,7 +356,7 @@ describe('GET /api/projects/:projectSlug', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { cookie: carolCookie },
     });
     expect(res.statusCode).toBe(200);
@@ -351,9 +366,10 @@ describe('GET /api/projects/:projectSlug', () => {
   });
 
   it('returns 404 for non-existent slug', async () => {
+    const { body: workspace } = await createWorkspace(aliceCookie, 'Missing Slug Workspace');
     const res = await app.inject({
       method: 'GET',
-      url: '/api/projects/no-such-project-ever',
+      url: `/api/workspaces/${workspace.slug}/projects/no-such-project-ever`,
       headers: { cookie: aliceCookie },
     });
     expect(res.statusCode).toBe(404);
@@ -362,7 +378,7 @@ describe('GET /api/projects/:projectSlug', () => {
   it('returns 401 when unauthenticated', async () => {
     const res = await app.inject({
       method: 'GET',
-      url: '/api/projects/anything',
+      url: '/api/workspaces/anything/projects/anything',
     });
     expect(res.statusCode).toBe(401);
   });
@@ -375,7 +391,7 @@ describe('PATCH /api/projects/:projectSlug', () => {
 
     const res = await app.inject({
       method: 'PATCH',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { 'content-type': 'application/json', cookie: aliceCookie },
       payload: { name: 'After Patch' },
     });
@@ -392,7 +408,7 @@ describe('PATCH /api/projects/:projectSlug', () => {
     // Alice (workspace owner) can update Bob's project
     const res = await app.inject({
       method: 'PATCH',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { 'content-type': 'application/json', cookie: aliceCookie },
       payload: { name: 'Alice Updated' },
     });
@@ -408,7 +424,7 @@ describe('PATCH /api/projects/:projectSlug', () => {
 
     const res = await app.inject({
       method: 'PATCH',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { 'content-type': 'application/json', cookie: bobCookie },
       payload: { name: 'Bob Tries' },
     });
@@ -421,7 +437,7 @@ describe('PATCH /api/projects/:projectSlug', () => {
 
     const res = await app.inject({
       method: 'PATCH',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { 'content-type': 'application/json', cookie: bobCookie },
       payload: { name: 'Bob Tries' },
     });
@@ -436,7 +452,7 @@ describe('DELETE /api/projects/:projectSlug', () => {
 
     const res = await app.inject({
       method: 'DELETE',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { 'content-type': 'application/json', cookie: aliceCookie },
       payload: { confirmation: 'Delete To Delete' },
     });
@@ -445,7 +461,7 @@ describe('DELETE /api/projects/:projectSlug', () => {
     // Verify it's gone
     const check = await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { cookie: aliceCookie },
     });
     expect(check.statusCode).toBe(404);
@@ -457,7 +473,7 @@ describe('DELETE /api/projects/:projectSlug', () => {
 
     const res = await app.inject({
       method: 'DELETE',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { 'content-type': 'application/json', cookie: aliceCookie },
       payload: { confirmation: 'Wrong Text' },
     });
@@ -475,11 +491,107 @@ describe('DELETE /api/projects/:projectSlug', () => {
 
     const res = await app.inject({
       method: 'DELETE',
-      url: `/api/projects/${project.slug}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
       headers: { 'content-type': 'application/json', cookie: bobCookie },
       payload: { confirmation: 'Delete Member Cannot Delete' },
     });
     expect(res.statusCode).toBe(403);
+  });
+});
+
+// --- Cross-workspace duplicate slugs ---
+
+describe('duplicate project slugs across workspaces', () => {
+  it('fetches, updates, and deletes each same-slug project via its own workspace URL', async () => {
+    const { body: workspaceA } = await createWorkspace(aliceCookie, 'Dup Slug Workspace A');
+    const { body: workspaceB } = await createWorkspace(aliceCookie, 'Dup Slug Workspace B');
+
+    const { body: projectA } = await createProject(aliceCookie, workspaceA.slug, 'Shared Name');
+    const { body: projectB } = await createProject(aliceCookie, workspaceB.slug, 'Shared Name');
+
+    // Same slug, different projects in different workspaces
+    expect(projectA.slug).toBe(projectB.slug);
+    expect(projectA.id).not.toBe(projectB.id);
+
+    // Each fetchable via its own workspace URL, resolving to the right project
+    const getA = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspaceA.slug}/projects/${projectA.slug}`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(getA.statusCode).toBe(200);
+    expect(JSON.parse(getA.body).id).toBe(projectA.id);
+
+    const getB = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspaceB.slug}/projects/${projectB.slug}`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(getB.statusCode).toBe(200);
+    expect(JSON.parse(getB.body).id).toBe(projectB.id);
+
+    // Updating one does not touch the other
+    const patchA = await app.inject({
+      method: 'PATCH',
+      url: `/api/workspaces/${workspaceA.slug}/projects/${projectA.slug}`,
+      headers: { 'content-type': 'application/json', cookie: aliceCookie },
+      payload: { name: 'Renamed A' },
+    });
+    expect(patchA.statusCode).toBe(200);
+    expect(JSON.parse(patchA.body).id).toBe(projectA.id);
+    expect(JSON.parse(patchA.body).name).toBe('Renamed A');
+
+    const getBAgain = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspaceB.slug}/projects/${projectB.slug}`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(JSON.parse(getBAgain.body).id).toBe(projectB.id);
+    expect(JSON.parse(getBAgain.body).name).toBe('Shared Name');
+
+    // Deleting one leaves the other reachable
+    const deleteA = await app.inject({
+      method: 'DELETE',
+      url: `/api/workspaces/${workspaceA.slug}/projects/${projectA.slug}`,
+      headers: { 'content-type': 'application/json', cookie: aliceCookie },
+      payload: { confirmation: 'Delete Renamed A' },
+    });
+    expect(deleteA.statusCode).toBe(204);
+
+    const getBFinal = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspaceB.slug}/projects/${projectB.slug}`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(getBFinal.statusCode).toBe(200);
+    expect(JSON.parse(getBFinal.body).id).toBe(projectB.id);
+  });
+
+  it('returns 404 when a project slug is requested under the wrong workspace', async () => {
+    const { body: workspaceA } = await createWorkspace(aliceCookie, 'Wrong Workspace A');
+    const { body: workspaceB } = await createWorkspace(aliceCookie, 'Wrong Workspace B');
+    const { body: project } = await createProject(aliceCookie, workspaceA.slug, 'Only In A');
+
+    // The slug exists only in workspace A; requesting it under B returns 404
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspaceB.slug}/projects/${project.slug}`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('returns 404 (not 403) for a non-member requesting an existing project', async () => {
+    const { body: workspace } = await createWorkspace(aliceCookie, 'Denial Workspace');
+    const { body: project } = await createProject(aliceCookie, workspace.slug, 'Denied Project');
+
+    // Bob is neither a workspace member nor a project member
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
+      headers: { cookie: bobCookie },
+    });
+    expect(res.statusCode).toBe(404);
   });
 });
 
@@ -493,7 +605,7 @@ describe('GET /api/projects/:projectSlug/members', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}/members`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/members`,
       headers: { cookie: aliceCookie },
     });
     expect(res.statusCode).toBe(200);
@@ -508,7 +620,7 @@ describe('GET /api/projects/:projectSlug/members', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}/members`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/members`,
       headers: { cookie: bobCookie },
     });
     expect(res.statusCode).toBe(404);
@@ -527,7 +639,7 @@ describe('DELETE /api/projects/:projectSlug/members/:userId', () => {
 
     const res = await app.inject({
       method: 'DELETE',
-      url: `/api/projects/${project.slug}/members/${bobId}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/members/${bobId}`,
       headers: { cookie: aliceCookie },
     });
     expect(res.statusCode).toBe(204);
@@ -543,7 +655,7 @@ describe('DELETE /api/projects/:projectSlug/members/:userId', () => {
 
     const res = await app.inject({
       method: 'DELETE',
-      url: `/api/projects/${project.slug}/members/${aliceId}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/members/${aliceId}`,
       headers: { cookie: aliceCookie },
     });
     expect(res.statusCode).toBe(409);
@@ -561,7 +673,7 @@ describe('DELETE /api/projects/:projectSlug/members/:userId', () => {
 
     const res = await app.inject({
       method: 'DELETE',
-      url: `/api/projects/${project.slug}/members/${carolId}`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/members/${carolId}`,
       headers: { cookie: bobCookie },
     });
     expect(res.statusCode).toBe(403);
@@ -577,7 +689,7 @@ describe('GET /api/projects/:projectSlug/invites', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: `/api/projects/${project.slug}/invites`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/invites`,
       headers: { cookie: aliceCookie },
     });
     expect(res.statusCode).toBe(200);
@@ -597,7 +709,7 @@ describe('POST /api/projects/:projectSlug/invites', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: `/api/projects/${project.slug}/invites`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/invites`,
       headers: { 'content-type': 'application/json', cookie: aliceCookie },
       payload: { email: 'newuser@example.com', role: 'manager' },
     });
@@ -615,7 +727,7 @@ describe('POST /api/projects/:projectSlug/invites', () => {
 
     const res = await app.inject({
       method: 'POST',
-      url: `/api/projects/${project.slug}/invites`,
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/invites`,
       headers: { 'content-type': 'application/json', cookie: bobCookie },
       payload: { email: 'blocked@example.com' },
     });

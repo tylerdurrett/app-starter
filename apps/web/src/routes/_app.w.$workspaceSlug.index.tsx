@@ -80,8 +80,8 @@ function WorkspaceHomePage() {
                   {projects.map((project) => (
                     <li key={project.id}>
                       <Link
-                        to="/p/$projectSlug"
-                        params={{ projectSlug: project.slug }}
+                        to="/w/$workspaceSlug/p/$projectSlug"
+                        params={{ workspaceSlug: workspace.slug, projectSlug: project.slug }}
                         className="flex items-center gap-3 p-3 rounded-lg hover:bg-accent/50 transition-colors"
                       >
                         <div className="w-10 h-10 rounded-lg bg-accent flex items-center justify-center text-sm font-semibold">
@@ -169,7 +169,10 @@ function WorkspaceHomePage() {
               ? prev
               : [...prev, { ...project, role: 'owner' }],
           );
-          navigate({ to: '/p/$projectSlug', params: { projectSlug: project.slug } });
+          navigate({
+            to: '/w/$workspaceSlug/p/$projectSlug',
+            params: { workspaceSlug: workspace.slug, projectSlug: project.slug },
+          });
         }}
       />
     </div>

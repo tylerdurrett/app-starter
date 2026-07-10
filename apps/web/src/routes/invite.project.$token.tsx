@@ -39,8 +39,8 @@ function ProjectInvitePage() {
       <TerminalCard
         title="Invite Already Accepted"
         message={<>This invite to <strong>{invite.projectName}</strong> has already been accepted.</>}
-        linkTo="/p/$projectSlug"
-        linkParams={{ projectSlug: invite.projectSlug }}
+        linkTo="/w/$workspaceSlug/p/$projectSlug"
+        linkParams={{ workspaceSlug: invite.workspaceSlug, projectSlug: invite.projectSlug }}
         linkLabel="Go to project"
       />
     );
@@ -78,7 +78,10 @@ function PendingInviteView({ invite }: { invite: ProjectInviteMetadata }) {
 
     try {
       const result = await acceptProjectInviteByToken(token);
-      await navigate({ to: '/p/$projectSlug', params: { projectSlug: result.projectSlug } });
+      await navigate({
+        to: '/w/$workspaceSlug/p/$projectSlug',
+        params: { workspaceSlug: invite.workspaceSlug, projectSlug: result.projectSlug },
+      });
     } catch (err) {
       const message = err instanceof ApiError
         ? (err.parsedMessage || 'Failed to accept invite')
