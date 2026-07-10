@@ -88,12 +88,20 @@ export async function createProject({
 /**
  * True only for the projects (workspace_id, slug) unique violation — the race
  * we retry. Any other error (including the projectMemberships insert) must not
- * be swallowed.
+ * be swallowed. Drizzle wraps the driver error in a DrizzleQueryError, so the
+ * postgres.js fields (code, constraint_name) live on the `cause` chain, not the
+ * top-level error.
  */
 function isSlugUniqueViolation(err: unknown): boolean {
-  if (typeof err !== 'object' || err === null) return false;
-  const e = err as { code?: unknown; constraint_name?: unknown };
-  return e.code === '23505' && e.constraint_name === 'projects_workspace_id_slug_unique';
+  let current: unknown = err;
+  while (typeof current === 'object' && current !== null) {
+    const e = current as { code?: unknown; constraint_name?: unknown; cause?: unknown };
+    if (e.code === '23505' && e.constraint_name === 'projects_workspace_id_slug_unique') {
+      return true;
+    }
+    current = e.cause;
+  }
+  return false;
 }
 
 export async function listProjectsForUser(userId: string) {
