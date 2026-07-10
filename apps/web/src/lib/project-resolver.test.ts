@@ -68,6 +68,23 @@ describe('resolveProject', () => {
     expect(listWorkspacesMock).not.toHaveBeenCalled();
   });
 
+  it('falls through the chain when the last-active project access was revoked', async () => {
+    // The server re-checks access in getLastActiveProject and returns null when the
+    // stored last-active project was deleted or the user's access was revoked. The
+    // resolver must not resume it — it falls through to the next available project.
+    getLastActiveProjectMock.mockResolvedValue(null);
+    listProjectsMock.mockResolvedValue([
+      project({ slug: 'still-mine', workspaceSlug: 'still-ws', role: 'owner' }) as never,
+    ]);
+
+    const target = await resolveProject();
+
+    expect(target).toEqual({
+      to: '/w/$workspaceSlug/p/$projectSlug',
+      params: { workspaceSlug: 'still-ws', projectSlug: 'still-mine' },
+    });
+  });
+
   it('falls back to the first workspace when the user has no projects', async () => {
     listWorkspacesMock.mockResolvedValue([
       { id: 'w1', name: 'Acme', slug: 'acme', role: 'owner' } as never,
