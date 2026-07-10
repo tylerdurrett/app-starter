@@ -37,6 +37,9 @@ import {
   acceptInvite,
 } from '../src/projects/invites.js';
 
+import { requireProjectPermission } from '../src/auth/require-permission.js';
+import type { FastifyRequest } from 'fastify';
+
 // ---- helpers ----
 
 let app: FastifyInstance;
@@ -825,5 +828,126 @@ describe('invites', () => {
         code: 'CONFLICT',
       });
     });
+  });
+
+  describe('workspace-scoped resolution', () => {
+    it('createInvite with a non-matching workspaceSlug resolves NOT_FOUND', async () => {
+      const wsA = await createAndTrackWorkspace('Inv Cross Ws A', aliceId);
+      const wsB = await createAndTrackWorkspace('Inv Cross Ws B', aliceId);
+      // Distinct names → distinct slugs, so projA's slug is genuinely absent from wsB.
+      const projA = await createAndTrack('Inv Cross A Only', aliceId, { wsId: wsA.id });
+      await createAndTrack('Inv Cross B Only', aliceId, { wsId: wsB.id });
+
+      // projA.slug lives in wsA; resolving it under wsB must not find a row.
+      await expect(
+        createInvite(projA.slug, aliceId, { email: 'crossinv@test.com' }, wsB.slug),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    });
+
+    it('createInvite with the matching workspaceSlug resolves the correct project', async () => {
+      const wsA = await createAndTrackWorkspace('Inv Match Ws A', aliceId);
+      const wsB = await createAndTrackWorkspace('Inv Match Ws B', aliceId);
+      const projA = await createAndTrack('Inv Match Shared', aliceId, { wsId: wsA.id });
+      const projB = await createAndTrack('Inv Match Shared', aliceId, { wsId: wsB.id });
+
+      const { invite } = await createInvite(
+        projB.slug,
+        aliceId,
+        { email: 'matchinv@test.com' },
+        wsB.slug,
+      );
+      expect(invite.email).toBe('matchinv@test.com');
+      // The invite must attach to the wsB project, not the same-slug wsA project.
+      expect(invite.projectId).toBe(projB.id);
+      expect(invite.projectId).not.toBe(projA.id);
+    });
+
+    it('createInvite preserves FORBIDDEN semantics when threaded with a workspaceSlug', async () => {
+      const ws = await createAndTrackWorkspace('Inv Forbid Ws', aliceId);
+      const proj = await createAndTrack('Inv Forbid Threaded', aliceId, { wsId: ws.id });
+      await addProjectMember(proj.id, bobId, 'member');
+
+      await expect(
+        createInvite(proj.slug, bobId, { email: 'nope@test.com' }, ws.slug),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+
+    it('listInvites resolves the project in the given workspace', async () => {
+      const wsA = await createAndTrackWorkspace('Inv List Ws A', aliceId);
+      const wsB = await createAndTrackWorkspace('Inv List Ws B', aliceId);
+      // Distinct names so projA's slug is absent from wsB and the NOT_FOUND is real.
+      const projA = await createAndTrack('Inv List A Only', aliceId, { wsId: wsA.id });
+      const projB = await createAndTrack('Inv List B Only', aliceId, { wsId: wsB.id });
+      await createInvite(projA.slug, aliceId, { email: 'ina-list@test.com' }, wsA.slug);
+      await createInvite(projB.slug, aliceId, { email: 'inb-list@test.com' }, wsB.slug);
+
+      const listB = await listInvites(projB.slug, aliceId, wsB.slug);
+      expect(listB.map((i) => i.email)).toContain('inb-list@test.com');
+      expect(listB.map((i) => i.email)).not.toContain('ina-list@test.com');
+
+      // A slug that does not live in the named workspace resolves NOT_FOUND.
+      await expect(
+        listInvites(projA.slug, aliceId, wsB.slug),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    });
+
+    it('revokeInvite with a non-matching workspaceSlug resolves NOT_FOUND', async () => {
+      const wsA = await createAndTrackWorkspace('Inv Revoke Ws A', aliceId);
+      const wsB = await createAndTrackWorkspace('Inv Revoke Ws B', aliceId);
+      // Distinct names so the NOT_FOUND comes from the (workspace, slug) project
+      // lookup rather than falling through to the invite lookup.
+      const projA = await createAndTrack('Inv Revoke A Only', aliceId, { wsId: wsA.id });
+      await createAndTrack('Inv Revoke B Only', aliceId, { wsId: wsB.id });
+      const { invite } = await createInvite(
+        projA.slug,
+        aliceId,
+        { email: 'revcross@test.com' },
+        wsA.slug,
+      );
+
+      await expect(
+        revokeInvite(projA.slug, aliceId, invite.id, wsB.slug),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+      // The invite is untouched and still pending under the correct workspace.
+      const list = await listInvites(projA.slug, aliceId, wsA.slug);
+      expect(list.find((i) => i.id === invite.id)).toBeDefined();
+    });
+  });
+});
+
+describe('requireProjectPermission workspace threading', () => {
+  it('carries workspaceSlug to the resolver, selecting the same-slug project in the named workspace', async () => {
+    const ts = Date.now();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/auth/sign-up/email',
+      headers: { 'content-type': 'application/json' },
+      payload: { email: `guard-${ts}@test.com`, password: 'password123', name: 'Guard' },
+    });
+    const guardId = JSON.parse(res.body).user.id;
+    const cookie = (res.headers['set-cookie'] as string).split(';')[0];
+    const req = { headers: { cookie } } as unknown as FastifyRequest;
+
+    const wsA = await createAndTrackWorkspace('Guard Ws A', guardId);
+    const wsB = await createAndTrackWorkspace('Guard Ws B', guardId);
+    const projA = await createAndTrack('Guard Shared', guardId, { wsId: wsA.id });
+    const projB = await createAndTrack('Guard Shared', guardId, { wsId: wsB.id });
+
+    const resolved = await requireProjectPermission(req, projB.slug, 'project:read', wsB.slug);
+    expect(resolved.project.id).toBe(projB.id);
+    expect(resolved.project.id).not.toBe(projA.id);
+
+    // A slug not present in the named workspace surfaces as NOT_FOUND (404 semantics).
+    await expect(
+      requireProjectPermission(req, projB.slug, 'project:read', 'no-such-workspace'),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('still throws 401 when unauthenticated (semantics unchanged)', async () => {
+    const req = { headers: {} } as unknown as FastifyRequest;
+    await expect(
+      requireProjectPermission(req, 'any-slug', 'project:read', 'any-ws'),
+    ).rejects.toMatchObject({ statusCode: 401 });
   });
 });
