@@ -91,11 +91,13 @@ export const workspaceInvites = pgTable('workspace_invites', {
 export const projects = pgTable('projects', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
-  slug: text('slug').notNull().unique(),
+  slug: text('slug').notNull(),
   workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
+}, (t) => [
+  unique('projects_workspace_id_slug_unique').on(t.workspaceId, t.slug),
+]);
 
 export const projectMemberships = pgTable('project_memberships', {
   id: text('id').primaryKey(),
