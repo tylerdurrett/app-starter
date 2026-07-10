@@ -10,33 +10,28 @@ import { can, type ProjectRole, type ProjectPermission } from './permissions.js'
  * 2. Workspace owner/manager gets synthetic owner role on all projects
  * 3. Workspace member gets synthetic member role on all projects
  *
- * When `workspaceSlug` is provided the initial lookup keys on the composite
- * (workspace, slug) identity via a NON-AUTHORIZING join to `workspaces` — a slug
- * living only in a different workspace therefore returns no row and surfaces as
- * NOT_FOUND. When omitted the lookup falls back to the bare slug (transitional
- * path for callers that have not yet threaded the workspace segment).
+ * The initial lookup keys on the composite (workspace, slug) identity via a
+ * NON-AUTHORIZING join to `workspaces` — a slug living only in a different
+ * workspace therefore returns no row and surfaces as NOT_FOUND. The join is
+ * authorization-free on purpose: it must not filter out a user with direct
+ * project access who is not a member of the parent workspace.
  */
 export async function resolveProjectWithOverride(
   projectSlug: string,
   actorUserId: string,
-  requiredPermission?: ProjectPermission,
-  workspaceSlug?: string,
+  requiredPermission: ProjectPermission | undefined,
+  workspaceSlug: string,
 ): Promise<{
   project: typeof projects.$inferSelect;
   role: ProjectRole;
   viaWorkspaceOverride?: boolean;
 }> {
-  // First, get the project — by (workspace, slug) when a workspace is given,
-  // otherwise by bare slug. The workspaces join is authorization-free on
-  // purpose: it must not filter out a user with direct project access who is
-  // not a member of the parent workspace.
-  const [project] = workspaceSlug
-    ? await db
-        .select(getTableColumns(projects))
-        .from(projects)
-        .innerJoin(workspaces, eq(projects.workspaceId, workspaces.id))
-        .where(and(eq(workspaces.slug, workspaceSlug), eq(projects.slug, projectSlug)))
-    : await db.select().from(projects).where(eq(projects.slug, projectSlug));
+  // Resolve the project by (workspace, slug).
+  const [project] = await db
+    .select(getTableColumns(projects))
+    .from(projects)
+    .innerJoin(workspaces, eq(projects.workspaceId, workspaces.id))
+    .where(and(eq(workspaces.slug, workspaceSlug), eq(projects.slug, projectSlug)));
 
   if (!project) {
     throw new ServiceError('NOT_FOUND', 'Project not found');

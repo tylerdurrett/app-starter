@@ -10,7 +10,7 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-export async function listInvites(slug: string, actorUserId: string, workspaceSlug?: string) {
+export async function listInvites(slug: string, actorUserId: string, workspaceSlug: string) {
   const { project } = await resolveProjectAndRole(
     slug,
     actorUserId,
@@ -42,7 +42,7 @@ export async function createInvite(
   slug: string,
   actorUserId: string,
   { email, role = 'member' }: { email: string; role?: 'manager' | 'member' },
-  workspaceSlug?: string,
+  workspaceSlug: string,
 ) {
   const { project } = await resolveProjectAndRole(
     slug,
@@ -107,7 +107,7 @@ export async function revokeInvite(
   slug: string,
   actorUserId: string,
   inviteId: string,
-  workspaceSlug?: string,
+  workspaceSlug: string,
 ) {
   const { project } = await resolveProjectAndRole(
     slug,
