@@ -77,15 +77,15 @@ export function NavRail() {
           </>
         )}
 
-        {activeProjectSlug && (
+        {activeProjectSlug && activeWorkspace && (
           <>
             {/* Dashboard uses exact-match — it's the /p/:slug index route, so nested pages shouldn't light it up. */}
             <NavTile
               label="Dashboard"
               icon={LayoutDashboard}
-              to="/p/$projectSlug"
-              params={{ projectSlug: activeProjectSlug }}
-              active={currentPath === `/p/${activeProjectSlug}`}
+              to="/w/$workspaceSlug/p/$projectSlug"
+              params={{ workspaceSlug: activeWorkspace.slug, projectSlug: activeProjectSlug }}
+              active={currentPath === `/w/${activeWorkspace.slug}/p/${activeProjectSlug}`}
             />
           </>
         )}
