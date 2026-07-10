@@ -192,23 +192,3 @@ export function useActiveContext(): ActiveContext {
 
   return { ...resolved, urlProjectWorkspaceName };
 }
-
-// --- Transitional thin wrappers ---------------------------------------------
-// Kept so this module typechecks on its own before the consumers are repointed
-// at useActiveContext in the next commit. Removed there.
-
-export type ActiveWorkspaceContext = {
-  slug: string | null;
-  fromUrl: boolean;
-  urlProjectWorkspaceName: string | null;
-};
-
-export function useActiveWorkspaceSlug(): ActiveWorkspaceContext {
-  const { workspaceSlug, fromUrl, urlProjectWorkspaceName } = useActiveContext();
-  return { slug: workspaceSlug, fromUrl, urlProjectWorkspaceName };
-}
-
-export function useActiveProjectSlug(): { slug: string | null; fromUrl: boolean } {
-  const { projectSlug } = useActiveContext();
-  return { slug: projectSlug, fromUrl: false };
-}
