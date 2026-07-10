@@ -11,6 +11,7 @@ import {
   removeMember,
   setLastActiveProject,
   getLastActiveProject,
+  ServiceError,
 } from '../projects/service.js';
 import { listInvites, createInvite, revokeInvite } from '../projects/invites.js';
 import { resolveWorkspaceAndRole } from '../workspaces/service.js';
@@ -74,11 +75,16 @@ const projectRoutes: FastifyPluginAsync = async (app) => {
         .select({ slug: workspaces.slug, name: workspaces.name })
         .from(workspaces)
         .where(eq(workspaces.id, project.workspaceId));
+      // The project's workspaceId FK guarantees this row exists; a missing row
+      // is an invariant violation, so fail loudly rather than emit null fields.
+      if (!workspace) {
+        throw new ServiceError('NOT_FOUND', 'Workspace not found for project');
+      }
       return {
         ...project,
         role,
-        workspaceSlug: workspace?.slug ?? null,
-        workspaceName: workspace?.name ?? null,
+        workspaceSlug: workspace.slug,
+        workspaceName: workspace.name,
       };
     },
   );
