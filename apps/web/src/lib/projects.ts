@@ -18,7 +18,6 @@ export interface ProjectWithRole extends Project {
 
 // Returned by GET /api/workspaces/:workspaceSlug/projects/:projectSlug — includes workspace context so the
 // nav shell can render the parent workspace even when the user has project-only access.
-// workspaceSlug/workspaceName are inherited from Project (always non-null).
 export type ProjectWithWorkspace = ProjectWithRole;
 
 export async function getLastActiveProject(): Promise<Project | null> {

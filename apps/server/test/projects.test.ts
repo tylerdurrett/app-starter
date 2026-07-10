@@ -273,6 +273,21 @@ describe('GET /api/projects/:projectSlug', () => {
     expect(body.role).toBe('owner');
   });
 
+  it('returns non-null workspaceSlug/workspaceName for a normal project', async () => {
+    const { body: workspace } = await createWorkspace(aliceCookie, 'Enriched Workspace');
+    const { body: project } = await createProject(aliceCookie, workspace.slug, 'Enriched Project');
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.workspaceSlug).toBe(workspace.slug);
+    expect(body.workspaceName).toBe(workspace.name);
+  });
+
   it('workspace owner can access project via admin override', async () => {
     const { body: workspace } = await createWorkspace(aliceCookie, 'Override Workspace');
 
