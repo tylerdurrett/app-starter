@@ -242,9 +242,13 @@ export function useActiveContext(): ActiveContext {
     getLastActiveProject()
       .then((serverProject) => {
         if (cancelled) return;
-        // Server disagrees (null => deleted / access revoked, or a different
-        // project): clear the stale hint and drop it from the returned unit.
-        if (!activeContextAgreesWithServer(cached, serverProject)) {
+        // Record the verdict for THIS unit either way: on disagreement (null =>
+        // deleted / access revoked, or a different project) clear the stale hint
+        // and drop it from the returned unit; on agreement reset any prior stale
+        // flag so a re-cached, still-valid unit paints again.
+        if (activeContextAgreesWithServer(cached, serverProject)) {
+          setStaleKey(null);
+        } else {
           clearActiveContext();
           setStaleKey(cachedKey);
         }
@@ -256,9 +260,15 @@ export function useActiveContext(): ActiveContext {
 
     return () => {
       cancelled = true;
+      // Release the fetch guard so a re-setup re-issues the fetch. React
+      // StrictMode mounts effects setup -> cleanup -> setup in dev; without this
+      // the cleanup would cancel the only in-flight fetch and the guard would
+      // block the re-setup, so reconciliation would never run. Also re-validates
+      // on genuine remounts / when the same unit is revisited.
+      if (reconciledKeyRef.current === cachedKey) reconciledKeyRef.current = null;
     };
     // Keyed on the primitive cachedKey so identity churn of `cached` (a fresh
-    // object each render) never re-runs the effect or cancels an in-flight fetch.
+    // object each render) never re-runs the effect.
   }, [cachedKey]);
 
   // Once the server has ruled this unit stale, paint as if the cache were empty
