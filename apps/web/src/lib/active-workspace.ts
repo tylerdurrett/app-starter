@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouterState, useMatch } from '@tanstack/react-router';
+import { getLastActiveProject, type Project } from './projects';
 
 // Single coherent active-context hint. The workspace and project slugs are
 // stored together as one unit so a workspace remembered in one session can
@@ -81,6 +82,39 @@ export function readActiveContext(): StoredActiveContext | null {
 /** Safe JSON write of the single unit. Swallows storage errors. */
 export function writeActiveContext(ctx: StoredActiveContext): void {
   safeWrite(ACTIVE_CONTEXT_KEY, JSON.stringify(ctx));
+}
+
+/** Safe removal of the single unit. Swallows storage errors. */
+export function clearActiveContext(): void {
+  try {
+    window.localStorage.removeItem(ACTIVE_CONTEXT_KEY);
+  } catch {
+    // storage disabled (private mode, quota, etc.) — nothing to clear
+  }
+}
+
+/**
+ * Pure, React-free reconciliation of the cached hint against the server's
+ * authoritative last-active project (`users.lastActiveProjectId`, re-checked
+ * for membership on every read — so it is null for a deleted project or one the
+ * user's access was revoked). The server answer is the sole authority: the
+ * cache never overrides a disagreeing server answer.
+ *
+ * Returns true when the hint AGREES with the server (keep it), false when it is
+ * stale and must be cleared. A null server project is always stale. Otherwise
+ * disagreement prefers the id when the cache carries one; else it compares the
+ * coherent `(workspaceSlug, projectSlug)` pair (never crossing workspaces).
+ */
+export function activeContextAgreesWithServer(
+  cached: StoredActiveContext,
+  serverProject: Project | null,
+): boolean {
+  if (serverProject == null) return false;
+  if (cached.projectId != null) return cached.projectId === serverProject.id;
+  return (
+    cached.workspaceSlug === serverProject.workspaceSlug &&
+    cached.projectSlug === serverProject.slug
+  );
 }
 
 export type ResolveActiveContextInput = {
@@ -188,7 +222,54 @@ export function useActiveContext(): ActiveContext {
   // The cache is only needed to paint project-less routes; when the URL already
   // carries a full pair it is authoritative, so skip the read entirely.
   const cached = hasUrlPair ? null : readActiveContext();
-  const resolved = resolveActiveContext({ urlWorkspaceSlug, urlProjectSlug, urlProjectId, cached });
+  const cachedKey = cached ? JSON.stringify(cached) : null;
+
+  // Reconcile the cached hint (an optimistic first-paint) against the server
+  // authority once it resolves. We fetch once per distinct cached unit and hold
+  // the "this unit is stale" decision in state so the drop survives re-renders.
+  const [staleKey, setStaleKey] = useState<string | null>(null);
+  const reconciledKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    // Only reconcile when actually painting from the cache (project-less route
+    // with a remembered unit). A full URL pair is authoritative and freshly
+    // re-written above, so it needs no reconciliation.
+    if (cached == null || cachedKey == null) return;
+    if (reconciledKeyRef.current === cachedKey) return;
+    reconciledKeyRef.current = cachedKey;
+
+    let cancelled = false;
+    getLastActiveProject()
+      .then((serverProject) => {
+        if (cancelled) return;
+        // Server disagrees (null => deleted / access revoked, or a different
+        // project): clear the stale hint and drop it from the returned unit.
+        if (!activeContextAgreesWithServer(cached, serverProject)) {
+          clearActiveContext();
+          setStaleKey(cachedKey);
+        }
+      })
+      .catch(() => {
+        // Network failure: keep the optimistic hint and allow a later retry.
+        if (reconciledKeyRef.current === cachedKey) reconciledKeyRef.current = null;
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // Keyed on the primitive cachedKey so identity churn of `cached` (a fresh
+    // object each render) never re-runs the effect or cancels an in-flight fetch.
+  }, [cachedKey]);
+
+  // Once the server has ruled this unit stale, paint as if the cache were empty
+  // so the nav stops showing the stale /w/$ws/p/$proj link.
+  const isStale = cachedKey != null && staleKey === cachedKey;
+  const resolved = resolveActiveContext({
+    urlWorkspaceSlug,
+    urlProjectSlug,
+    urlProjectId,
+    cached: isStale ? null : cached,
+  });
 
   return { ...resolved, urlProjectWorkspaceName };
 }
