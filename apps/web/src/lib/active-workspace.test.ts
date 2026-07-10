@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { parseProjectSlug, parseWorkspaceSlug } from './active-workspace';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  parseProjectSlug,
+  parseWorkspaceSlug,
+  readActiveContext,
+  resolveActiveContext,
+  writeActiveContext,
+  type StoredActiveContext,
+} from './active-workspace';
 
 describe('parseWorkspaceSlug', () => {
   it('resolves the workspace slug from a nested workspace path', () => {
@@ -44,5 +51,134 @@ describe('parseProjectSlug', () => {
 
   it('returns null for unrelated paths', () => {
     expect(parseProjectSlug('/onboarding/create-workspace')).toBeNull();
+  });
+});
+
+describe('resolveActiveContext', () => {
+  const cachedA: StoredActiveContext = {
+    workspaceSlug: 'workspace-A',
+    projectSlug: 'reports',
+    projectId: 'proj-a1',
+  };
+
+  it('never crosses a URL workspace with a cached project (AC4 drift)', () => {
+    // On /w/workspace-B/settings with (workspace-A, reports) remembered from a
+    // prior session: the workspace is B, but the project unit stays A's — the
+    // pair must never become (workspace-B, reports).
+    const resolved = resolveActiveContext({
+      urlWorkspaceSlug: 'workspace-B',
+      urlProjectSlug: null,
+      urlProjectId: null,
+      cached: cachedA,
+    });
+
+    expect(resolved.workspaceSlug).toBe('workspace-B');
+    expect(resolved.fromUrl).toBe(true);
+    // The coherent project unit belongs to workspace-A, not the URL's B.
+    expect(resolved.projectWorkspaceSlug).toBe('workspace-A');
+    expect(resolved.projectSlug).toBe('reports');
+    expect(resolved.projectId).toBe('proj-a1');
+    // The forbidden cross-workspace pairing is impossible.
+    const isCrossPair =
+      resolved.projectWorkspaceSlug === 'workspace-B' && resolved.projectSlug === 'reports';
+    expect(isCrossPair).toBe(false);
+  });
+
+  it('treats a full URL (workspace, project) pair as authoritative over the cache', () => {
+    const resolved = resolveActiveContext({
+      urlWorkspaceSlug: 'workspace-B',
+      urlProjectSlug: 'dashboards',
+      urlProjectId: 'proj-b7',
+      cached: cachedA,
+    });
+
+    expect(resolved.workspaceSlug).toBe('workspace-B');
+    expect(resolved.fromUrl).toBe(true);
+    expect(resolved.projectWorkspaceSlug).toBe('workspace-B');
+    expect(resolved.projectSlug).toBe('dashboards');
+    expect(resolved.projectId).toBe('proj-b7');
+  });
+
+  it('falls back to the cached unit whole on a project-less route with no URL workspace', () => {
+    const resolved = resolveActiveContext({
+      urlWorkspaceSlug: null,
+      urlProjectSlug: null,
+      urlProjectId: null,
+      cached: cachedA,
+    });
+
+    expect(resolved.workspaceSlug).toBe('workspace-A');
+    expect(resolved.fromUrl).toBe(false);
+    expect(resolved.projectWorkspaceSlug).toBe('workspace-A');
+    expect(resolved.projectSlug).toBe('reports');
+    expect(resolved.projectId).toBe('proj-a1');
+  });
+
+  it('yields an empty unit when there is no URL and no cache', () => {
+    const resolved = resolveActiveContext({
+      urlWorkspaceSlug: null,
+      urlProjectSlug: null,
+      urlProjectId: null,
+      cached: null,
+    });
+
+    expect(resolved).toEqual({
+      workspaceSlug: null,
+      fromUrl: false,
+      projectWorkspaceSlug: null,
+      projectSlug: null,
+      projectId: null,
+    });
+  });
+});
+
+describe('active-context storage round-trip', () => {
+  const originalWindow = (globalThis as { window?: unknown }).window;
+
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    (globalThis as { window?: unknown }).window = {
+      localStorage: {
+        getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+        setItem: (k: string, v: string) => void store.set(k, v),
+        removeItem: (k: string) => void store.delete(k),
+      },
+    };
+  });
+
+  afterEach(() => {
+    if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window;
+    else (globalThis as { window?: unknown }).window = originalWindow;
+  });
+
+  it('writes and reads back the single unit including projectId', () => {
+    const unit: StoredActiveContext = {
+      workspaceSlug: 'workspace-A',
+      projectSlug: 'reports',
+      projectId: 'proj-a1',
+    };
+    writeActiveContext(unit);
+    expect(readActiveContext()).toEqual(unit);
+  });
+
+  it('round-trips a null projectId', () => {
+    const unit: StoredActiveContext = {
+      workspaceSlug: 'workspace-A',
+      projectSlug: 'reports',
+      projectId: null,
+    };
+    writeActiveContext(unit);
+    expect(readActiveContext()).toEqual(unit);
+  });
+
+  it('returns null for absent storage', () => {
+    expect(readActiveContext()).toBeNull();
+  });
+
+  it('returns null for malformed / partial JSON instead of throwing', () => {
+    window.localStorage.setItem('activeContext', 'not json{');
+    expect(readActiveContext()).toBeNull();
+    window.localStorage.setItem('activeContext', JSON.stringify({ workspaceSlug: 'only-ws' }));
+    expect(readActiveContext()).toBeNull();
   });
 });
