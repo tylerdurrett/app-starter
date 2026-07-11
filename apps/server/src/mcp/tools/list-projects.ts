@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { AccessibleProject } from '../../projects/service.js';
-import { listAccessibleProjectsForUser } from '../../projects/service.js';
+import type { AuthorizedProject } from '../../projects/resolver.js';
+import { listAuthorizedProjectsForUser } from '../../projects/resolver.js';
 import type { McpAuthContext } from '../scopes.js';
 import { requireScope } from '../scopes.js';
 
@@ -9,21 +9,23 @@ interface ProjectGroup {
   id: string;
   name: string;
   slug: string;
-  projects: AccessibleProject[];
+  projects: AuthorizedProject[];
 }
 
-function groupProjectsByWorkspace(projects: AccessibleProject[]): ProjectGroup[] {
+function groupProjectsByWorkspace(projects: AuthorizedProject[]): ProjectGroup[] {
   const groupsByWorkspaceId = new Map<string, ProjectGroup>();
 
   for (const project of projects) {
-    const existing = groupsByWorkspaceId.get(project.workspace.id);
+    const existing = groupsByWorkspaceId.get(project.workspaceId);
     if (existing) {
       existing.projects.push(project);
       continue;
     }
 
-    groupsByWorkspaceId.set(project.workspace.id, {
-      ...project.workspace,
+    groupsByWorkspaceId.set(project.workspaceId, {
+      id: project.workspaceId,
+      name: project.workspaceName,
+      slug: project.workspaceSlug,
       projects: [project],
     });
   }
@@ -31,7 +33,7 @@ function groupProjectsByWorkspace(projects: AccessibleProject[]): ProjectGroup[]
   return [...groupsByWorkspaceId.values()];
 }
 
-function summarizeProjects(projects: AccessibleProject[], workspaceSlug?: string): string {
+function summarizeProjects(projects: AuthorizedProject[], workspaceSlug?: string): string {
   if (projects.length === 0) {
     return workspaceSlug
       ? `No accessible projects found in workspace '${workspaceSlug}'.`
@@ -43,7 +45,7 @@ function summarizeProjects(projects: AccessibleProject[], workspaceSlug?: string
     ? ` in '${grouped[0]?.name ?? workspaceSlug}'`
     : ` across ${grouped.length} workspace${grouped.length === 1 ? '' : 's'}`;
   const names = projects
-    .map((project) => `'${project.name}' (${project.workspace.name}, ${project.role})`)
+    .map((project) => `'${project.name}' (${project.workspaceName}, ${project.role})`)
     .join(', ');
 
   return `Found ${projects.length} project${projects.length === 1 ? '' : 's'}${scopeText}: ${names}`;
@@ -73,7 +75,9 @@ export function registerListProjectsTool(server: McpServer, authCtx: McpAuthCont
     async ({ workspaceSlug }) => {
       requireScope('projects:read', authCtx);
 
-      const projects = await listAccessibleProjectsForUser(authCtx.userId, { workspaceSlug });
+      const projects = workspaceSlug
+        ? await listAuthorizedProjectsForUser(authCtx.userId, { workspaceSlug })
+        : await listAuthorizedProjectsForUser(authCtx.userId);
       const workspaces = groupProjectsByWorkspace(projects);
 
       return {

@@ -3,8 +3,8 @@ import { describe, it, expect, vi } from 'vitest';
 vi.mock('../src/workspaces/service.js', () => ({
   listWorkspacesForUser: vi.fn(),
 }));
-vi.mock('../src/projects/service.js', () => ({
-  listAccessibleProjectsForUser: vi.fn(),
+vi.mock('../src/projects/resolver.js', () => ({
+  listAuthorizedProjectsForUser: vi.fn(),
 }));
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
