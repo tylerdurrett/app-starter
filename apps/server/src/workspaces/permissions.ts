@@ -1,4 +1,5 @@
-import type { TenancyRole } from '../tenancy/index.js';
+import { can as sharedCan } from '../tenancy/index.js';
+import type { PermissionMatrix, TenancyRole } from '../tenancy/index.js';
 
 export type WorkspaceRole = TenancyRole;
 
@@ -15,7 +16,7 @@ export type WorkspacePermission =
   | 'integrations:read'
   | 'integrations:manage';
 
-export const WORKSPACE_PERMISSIONS: Record<WorkspaceRole, Set<WorkspacePermission>> = {
+export const WORKSPACE_PERMISSIONS: PermissionMatrix<WorkspacePermission> = {
   owner: new Set([
     'workspace:read',
     'workspace:edit',
@@ -52,5 +53,5 @@ export const WORKSPACE_PERMISSIONS: Record<WorkspaceRole, Set<WorkspacePermissio
 
 /** Check whether a role has a given permission. */
 export function can(role: WorkspaceRole, permission: WorkspacePermission): boolean {
-  return WORKSPACE_PERMISSIONS[role].has(permission);
+  return sharedCan(WORKSPACE_PERMISSIONS, role, permission);
 }
