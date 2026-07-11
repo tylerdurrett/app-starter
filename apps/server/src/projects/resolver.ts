@@ -65,6 +65,21 @@ export interface AuthorizedProject {
 
 type ProjectAccessEntity = Omit<AuthorizedProject, 'role'>;
 
+const authorizedProjectColumns = {
+  id: projects.id,
+  name: projects.name,
+  slug: projects.slug,
+  workspaceId: projects.workspaceId,
+  workspaceSlug: workspaces.slug,
+  workspaceName: workspaces.name,
+  createdAt: projects.createdAt,
+  updatedAt: projects.updatedAt,
+};
+
+function projectRoleFromWorkspaceRole(workspaceRole: string): ProjectRole {
+  return workspaceRole === 'owner' || workspaceRole === 'manager' ? 'owner' : 'member';
+}
+
 async function resolveProjectAccess(
   workspaceSlug: string,
   projectSlug: string,
@@ -111,10 +126,7 @@ async function resolveProjectAccess(
           );
         if (!workspaceMember) return undefined;
 
-        const workspaceRole = workspaceMember.role as 'owner' | 'manager' | 'member';
-        const role: ProjectRole =
-          workspaceRole === 'owner' || workspaceRole === 'manager' ? 'owner' : 'member';
-        return { role, viaOverride: true };
+        return { role: projectRoleFromWorkspaceRole(workspaceMember.role), viaOverride: true };
       },
     ],
     can,
@@ -135,4 +147,46 @@ export async function getAuthorizedProjectBySlug(
     undefined,
   );
   return { ...entity, role };
+}
+
+export async function listAuthorizedProjectsForUser(
+  actorUserId: string,
+  options: { workspaceSlug?: string } = {},
+): Promise<AuthorizedProject[]> {
+  const directWhere = options.workspaceSlug
+    ? and(eq(projectMemberships.userId, actorUserId), eq(workspaces.slug, options.workspaceSlug))
+    : eq(projectMemberships.userId, actorUserId);
+  const directProjects = await db
+    .select({ ...authorizedProjectColumns, role: projectMemberships.role })
+    .from(projectMemberships)
+    .innerJoin(projects, eq(projectMemberships.projectId, projects.id))
+    .innerJoin(workspaces, eq(projects.workspaceId, workspaces.id))
+    .where(directWhere);
+
+  const workspaceWhere = options.workspaceSlug
+    ? and(eq(workspaceMemberships.userId, actorUserId), eq(workspaces.slug, options.workspaceSlug))
+    : eq(workspaceMemberships.userId, actorUserId);
+  const workspaceProjects = await db
+    .select({ ...authorizedProjectColumns, workspaceRole: workspaceMemberships.role })
+    .from(workspaceMemberships)
+    .innerJoin(workspaces, eq(workspaceMemberships.workspaceId, workspaces.id))
+    .innerJoin(projects, eq(projects.workspaceId, workspaces.id))
+    .where(workspaceWhere);
+
+  const projectsById = new Map<string, AuthorizedProject>();
+  for (const project of directProjects) {
+    projectsById.set(project.id, { ...project, role: project.role as ProjectRole });
+  }
+  for (const project of workspaceProjects) {
+    if (projectsById.has(project.id)) continue;
+    const { workspaceRole, ...authorizedProject } = project;
+    projectsById.set(project.id, {
+      ...authorizedProject,
+      role: projectRoleFromWorkspaceRole(workspaceRole),
+    });
+  }
+
+  return [...projectsById.values()].sort(
+    (a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id),
+  );
 }
