@@ -28,8 +28,8 @@ interface ProjectInviteTokenMeta {
 }
 
 interface ProjectAcceptResult {
+  projectId: string;
   projectSlug: string;
-  projectName: string;
 }
 
 const config: InviteLifecycleConfig<
@@ -117,8 +117,8 @@ const config: InviteLifecycleConfig<
   },
   membershipEntityId: (invite) => invite.projectId,
   buildAcceptResult: (invite) => ({
+    projectId: invite.projectId,
     projectSlug: invite.projectSlug,
-    projectName: invite.projectName,
   }),
 };
 
