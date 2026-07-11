@@ -42,4 +42,4 @@ A pending, emailed offer of membership at one level; distinct from a membership 
 ## Flagged ambiguities
 
 - The schema comment `// Projects (formerly workspaces)` records a rename: today's **Project** was originally called "workspace" before the second tenancy level was added. In conversation and code, "workspace" only ever means the top level.
-- Access denial to an existing project is reported as **not found**, never as forbidden — non-members must not learn the project exists.
+- Project access failures are non-disclosing: a single-Project lookup reports **not found**, list reads omit inaccessible Projects, and last-active restoration returns no Project when its reference is missing or inaccessible. None report forbidden merely because the Project exists.
