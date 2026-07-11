@@ -117,4 +117,40 @@ describe('apiFetchParsed boundary', () => {
     const { getWorkspace } = await loadLibReturning({ ...validWorkspace, role: 'owner' });
     await expect(getWorkspace('acme')).resolves.toMatchObject({ slug: 'acme', role: 'owner' });
   });
+
+  // Guard the request URL each resource function builds — a mistyped route
+  // template in workspaces.ts (wrong path, missing segment) must fail here even
+  // though the response body still parses. apiFetch prefixes SERVER_URL, so the
+  // captured argument is the full `http://test.local` + path string.
+  it('GETs the correct workspace route template', async () => {
+    const { getWorkspace } = await loadLibReturning({ ...validWorkspace, role: 'owner' });
+    await getWorkspace('acme');
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme');
+  });
+
+  it('PATCHes the correct workspace route template on update', async () => {
+    const { updateWorkspace } = await loadLibReturning(validWorkspace);
+    await updateWorkspace('acme', 'New');
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme');
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]?.method).toBe('PATCH');
+  });
+
+  it('DELETEs the correct workspace route template', async () => {
+    const { deleteWorkspace } = await loadLibReturning(null);
+    await deleteWorkspace('acme', 'acme');
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme');
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]?.method).toBe('DELETE');
+  });
+
+  it('lists members from the correct workspace route template', async () => {
+    const { listWorkspaceMembers } = await loadLibReturning([validMember]);
+    await listWorkspaceMembers('acme');
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme/members');
+  });
+
+  it('lists invites from the correct workspace route template', async () => {
+    const { listWorkspaceInvites } = await loadLibReturning([validInvite]);
+    await listWorkspaceInvites('acme');
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme/invites');
+  });
 });
