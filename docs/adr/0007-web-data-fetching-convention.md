@@ -33,6 +33,14 @@ developer or agent adds a fourth variant.
   never for render state a mutation can change, because loader data is a
   snapshot with no observer, so an on-screen value read from it goes stale
   after a mutation until a manual reload.
+- **Shared 30s `staleTime` baseline**: the shared `QueryClient` sets an
+  app-wide `defaultOptions.queries.staleTime` of 30 seconds (rather than
+  the library default of 0). Because loaders seed the cache immediately
+  before the component mounts, a `staleTime` of 0 would mark that entry
+  stale on first render and fire a redundant background revalidation; a 30s
+  window keeps loader-seeded reads fresh, eliminating the refetch-on-mount.
+  Mutation `invalidateQueries` bypasses `staleTime`, so renames and other
+  writes still refetch and reflect live.
 
 Rejected alternative: loaders-first (all data resolved before render,
 fewer spinners) with Query only for interactive refetching. Query-first
