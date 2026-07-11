@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Button,
   Input,
@@ -14,11 +15,11 @@ import {
   updateIntegration,
   testIntegration,
   deleteIntegration,
-  getIntegration,
   type MaskedIntegration,
   type TestIntegrationResult,
   type UpdateIntegrationInput,
 } from '../../lib/integrations';
+import { queryKeys } from '../../lib/query-keys';
 import { CheckCircle, AlertCircle, Clock, Trash2 } from 'lucide-react';
 import { DeleteIntegrationDialog } from '../../components/delete-integration-dialog';
 
@@ -30,25 +31,118 @@ export interface SettingsComponentProps {
 
 export function SlackSettingsComponent({ mode, workspaceSlug, integration }: SettingsComponentProps) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [name, setName] = useState(integration?.name || '');
   const [botToken, setBotToken] = useState('');
   const [signingSecret, setSigningSecret] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [testResult, setTestResult] = useState<TestIntegrationResult | null>(null);
-  const [currentIntegration, setCurrentIntegration] = useState<MaskedIntegration | undefined>(integration);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
-  useEffect(() => {
-    if (integration) {
-      setCurrentIntegration(integration);
-    }
-  }, [integration]);
+  // Invalidate both the detail and the list keys after an edit-mode write so
+  // the detail view (which reads the integration via useQuery) and the list
+  // both reflect the mutated data without a manual reload.
+  const invalidateIntegration = () =>
+    Promise.all([
+      integration &&
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.integration(workspaceSlug, integration.id),
+        }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations(workspaceSlug) }),
+    ]);
 
-  const handleSave = async (e: React.FormEvent) => {
+  // Create mode: POST then navigate to the new detail route. Also invalidate
+  // the list so it shows the new integration when navigated back.
+  const createMutation = useMutation({
+    mutationFn: () =>
+      createIntegration(workspaceSlug, {
+        type: 'slack',
+        name,
+        config: { botToken, signingSecret },
+      }),
+    onSuccess: async (created) => {
+      setSuccess('Slack integration created successfully');
+      await queryClient.invalidateQueries({ queryKey: queryKeys.integrations(workspaceSlug) });
+      setTimeout(() => {
+        navigate({
+          to: '/w/$workspaceSlug/integrations/$integrationId',
+          params: { workspaceSlug, integrationId: created.id },
+        });
+      }, 500);
+    },
+    onError: (err) => {
+      console.error('Failed to save integration:', err);
+      setError('Failed to save integration');
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: () => {
+      if (!integration) throw new Error('Missing integration');
+      const updateData: UpdateIntegrationInput = { name };
+      const config: Record<string, unknown> = {};
+      if (botToken.trim()) config.botToken = botToken;
+      if (signingSecret.trim()) config.signingSecret = signingSecret;
+      if (Object.keys(config).length > 0) updateData.config = config;
+      return updateIntegration(workspaceSlug, integration.id, updateData);
+    },
+    onSuccess: async () => {
+      setBotToken('');
+      setSigningSecret('');
+      setSuccess('Slack integration updated successfully');
+      // Refetch the integration (list + detail) to pick up the auto-retest status.
+      await invalidateIntegration();
+    },
+    onError: (err) => {
+      console.error('Failed to save integration:', err);
+      setError('Failed to save integration');
+    },
+  });
+
+  const testMutation = useMutation({
+    mutationFn: () => {
+      if (!integration) throw new Error('Missing integration');
+      return testIntegration(workspaceSlug, integration.id);
+    },
+    onSuccess: async (result) => {
+      setTestResult(result);
+      if (result.status === 'active') {
+        setSuccess('Connection test successful');
+      } else {
+        setError(`Connection test failed: ${result.error || 'Unknown error'}`);
+      }
+      // Refetch the integration (list + detail) to pick up the updated status.
+      await invalidateIntegration();
+    },
+    onError: (err) => {
+      console.error('Failed to test integration:', err);
+      setError('Failed to test connection');
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => {
+      if (!integration) throw new Error('Missing integration');
+      return deleteIntegration(workspaceSlug, integration.id);
+    },
+    onSuccess: async () => {
+      await invalidateIntegration();
+      navigate({
+        to: '/w/$workspaceSlug/integrations',
+        params: { workspaceSlug },
+      });
+    },
+    onError: (err) => {
+      console.error('Failed to delete integration:', err);
+      setError('Failed to delete integration');
+      setShowDeleteDialog(false);
+    },
+  });
+
+  const saving = createMutation.isPending || updateMutation.isPending;
+
+  const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
 
     setError('');
@@ -74,103 +168,24 @@ export function SlackSettingsComponent({ mode, workspaceSlug, integration }: Set
       return;
     }
 
-    setSaving(true);
-    try {
-      if (mode === 'create') {
-        const created = await createIntegration(workspaceSlug, {
-          type: 'slack',
-          name,
-          config: {
-            botToken,
-            signingSecret,
-          },
-        });
-        setSuccess('Slack integration created successfully');
-        setTimeout(() => {
-          navigate({
-            to: '/w/$workspaceSlug/integrations/$integrationId',
-            params: { workspaceSlug, integrationId: created.id },
-          });
-        }, 500);
-      } else if (integration) {
-        const updateData: UpdateIntegrationInput = { name };
-        const config: Record<string, unknown> = {};
-
-        if (botToken.trim()) {
-          config.botToken = botToken;
-        }
-        if (signingSecret.trim()) {
-          config.signingSecret = signingSecret;
-        }
-
-        if (Object.keys(config).length > 0) {
-          updateData.config = config;
-        }
-
-        await updateIntegration(workspaceSlug, integration.id, updateData);
-
-        // Reload the integration to get updated status after auto-retest
-        const updated = await getIntegration(workspaceSlug, integration.id);
-        setCurrentIntegration(updated);
-        setBotToken('');
-        setSigningSecret('');
-
-        setSuccess('Slack integration updated successfully');
-      }
-    } catch (error) {
-      console.error('Failed to save integration:', error);
-      setError('Failed to save integration');
-    } finally {
-      setSaving(false);
+    if (mode === 'create') {
+      createMutation.mutate();
+    } else if (integration) {
+      updateMutation.mutate();
     }
   };
 
-  const handleTest = async () => {
-    if (!currentIntegration) return;
-
-    setTesting(true);
+  const handleTest = () => {
+    if (!integration) return;
     setTestResult(null);
     setError('');
     setSuccess('');
-
-    try {
-      const result = await testIntegration(workspaceSlug, currentIntegration.id);
-      setTestResult(result);
-
-      // Reload integration to get updated status
-      const updated = await getIntegration(workspaceSlug, currentIntegration.id);
-      setCurrentIntegration(updated);
-
-      if (result.status === 'active') {
-        setSuccess('Connection test successful');
-      } else {
-        setError(`Connection test failed: ${result.error || 'Unknown error'}`);
-      }
-    } catch (error) {
-      console.error('Failed to test integration:', error);
-      setError('Failed to test connection');
-    } finally {
-      setTesting(false);
-    }
+    testMutation.mutate();
   };
 
-  const handleDelete = async () => {
-    if (!currentIntegration) return;
-
-    setDeleting(true);
-    try {
-      await deleteIntegration(workspaceSlug, currentIntegration.id);
-      navigate({
-        to: '/w/$workspaceSlug/integrations',
-        params: { workspaceSlug },
-      });
-    } catch (error) {
-      console.error('Failed to delete integration:', error);
-      setError('Failed to delete integration');
-    } finally {
-      setDeleting(false);
-      setShowDeleteDialog(false);
-    }
+  const handleDelete = () => {
+    if (!integration) return;
+    deleteMutation.mutate();
   };
 
   return (
@@ -270,7 +285,7 @@ export function SlackSettingsComponent({ mode, workspaceSlug, integration }: Set
         </CardContent>
       </Card>
 
-      {mode === 'edit' && currentIntegration && (
+      {mode === 'edit' && integration && (
         <>
           <Card>
             <CardHeader>
@@ -280,19 +295,19 @@ export function SlackSettingsComponent({ mode, workspaceSlug, integration }: Set
               <div className="flex items-center justify-between">
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
-                    <StatusIcon status={currentIntegration.status} />
-                    <span className="font-medium capitalize">{currentIntegration.status}</span>
+                    <StatusIcon status={integration.status} />
+                    <span className="font-medium capitalize">{integration.status}</span>
                   </div>
 
-                  {currentIntegration.lastTestedAt && (
+                  {integration.lastTestedAt && (
                     <p className="text-sm text-muted-foreground">
-                      Last tested: {new Date(currentIntegration.lastTestedAt).toLocaleString()}
+                      Last tested: {new Date(integration.lastTestedAt).toLocaleString()}
                     </p>
                   )}
 
-                  {currentIntegration.status === 'error' && currentIntegration.lastTestError && (
+                  {integration.status === 'error' && integration.lastTestError && (
                     <p className="text-sm text-red-400">
-                      Error: <code className="bg-red-500/10 border border-red-500/30 px-1 py-0.5 rounded">{currentIntegration.lastTestError}</code>
+                      Error: <code className="bg-red-500/10 border border-red-500/30 px-1 py-0.5 rounded">{integration.lastTestError}</code>
                     </p>
                   )}
                 </div>
@@ -300,9 +315,9 @@ export function SlackSettingsComponent({ mode, workspaceSlug, integration }: Set
                 <Button
                   variant="outline"
                   onClick={handleTest}
-                  disabled={testing}
+                  disabled={testMutation.isPending}
                 >
-                  {testing ? 'Testing...' : 'Test Connection'}
+                  {testMutation.isPending ? 'Testing...' : 'Test Connection'}
                 </Button>
               </div>
 
@@ -337,7 +352,7 @@ export function SlackSettingsComponent({ mode, workspaceSlug, integration }: Set
                 <Button
                   variant="destructive"
                   onClick={() => setShowDeleteDialog(true)}
-                  disabled={deleting}
+                  disabled={deleteMutation.isPending}
                 >
                   <Trash2 className="h-4 w-4 mr-2" />
                   Delete Integration
@@ -350,9 +365,9 @@ export function SlackSettingsComponent({ mode, workspaceSlug, integration }: Set
             <DeleteIntegrationDialog
               open={showDeleteDialog}
               onOpenChange={setShowDeleteDialog}
-              integrationName={currentIntegration.name}
+              integrationName={integration.name}
               onConfirm={handleDelete}
-              isDeleting={deleting}
+              isDeleting={deleteMutation.isPending}
             />
           )}
         </>
