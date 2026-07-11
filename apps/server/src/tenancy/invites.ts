@@ -177,6 +177,8 @@ export async function createInvite<
     status: 'pending',
     invitedByUserId: actorUserId,
     expiresAt,
+    // Cast required because the level-agnostic config types its tables as bare
+    // `PgTable` (no row model). Accepted deliberately — see #66.
   } as typeof config.invites.table.$inferInsert;
 
   const [invite] = await db.insert(config.invites.table).values(values).returning();
@@ -263,6 +265,8 @@ export async function acceptInvite<
       [config.memberships.entityIdKey]: entityId,
       userId: actorUserId,
       role: invite.role as TenancyRole,
+      // Cast required because the level-agnostic config types its tables as bare
+      // `PgTable` (no row model). Accepted deliberately — see #66.
     } as typeof config.memberships.table.$inferInsert;
 
     await tx.insert(config.memberships.table).values(membershipValues);
