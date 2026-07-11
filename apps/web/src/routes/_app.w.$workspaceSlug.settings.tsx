@@ -1,19 +1,20 @@
 import { createFileRoute, getRouteApi, useNavigate, useRouter } from '@tanstack/react-router';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
 import { canWorkspace, type WorkspaceRole } from '../lib/permissions';
 import { resolveProject } from '../lib/project-resolver';
 import {
   updateWorkspace,
   deleteWorkspace,
-  listWorkspaceMembers,
   removeWorkspaceMember,
-  listWorkspaceInvites,
   createWorkspaceInvite,
   revokeWorkspaceInvite,
-  type WorkspaceMember,
-  type WorkspaceInvite,
 } from '../lib/workspaces';
+import {
+  workspaceMembersQuery,
+  workspaceInvitesQuery,
+} from '../lib/workspace-settings-queries';
 import { Copy, UserMinus, X } from 'lucide-react';
 
 const workspaceRoute = getRouteApi('/_app/w/$workspaceSlug');
@@ -153,28 +154,20 @@ function GeneralSection({
 }
 
 function MembersSection({ slug, role }: { slug: string; role: WorkspaceRole }) {
-  const [members, setMembers] = useState<WorkspaceMember[]>([]);
-  const [loading, setLoading] = useState(true);
+  const canList = canWorkspace(role, 'workspace:members:list');
+  const membersQuery = useQuery({
+    ...workspaceMembersQuery(slug),
+    enabled: canList,
+  });
+  const members = membersQuery.data ?? [];
   const [error, setError] = useState('');
   const [removingId, setRemovingId] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!canWorkspace(role, 'workspace:members:list')) {
-      setLoading(false);
-      return;
-    }
-
-    listWorkspaceMembers(slug)
-      .then(setMembers)
-      .catch(() => setError('Failed to load members'))
-      .finally(() => setLoading(false));
-  }, [slug, role]);
 
   const handleRemove = async (userId: string) => {
     setRemovingId(userId);
     try {
       await removeWorkspaceMember(slug, userId);
-      setMembers((prev) => prev.filter((m) => m.userId !== userId));
+      await membersQuery.refetch();
     } catch {
       setError('Failed to remove member');
     } finally {
@@ -182,7 +175,7 @@ function MembersSection({ slug, role }: { slug: string; role: WorkspaceRole }) {
     }
   };
 
-  if (!canWorkspace(role, 'workspace:members:list')) {
+  if (!canList) {
     return (
       <Card>
         <CardHeader>
@@ -203,12 +196,15 @@ function MembersSection({ slug, role }: { slug: string; role: WorkspaceRole }) {
         <CardTitle>Members</CardTitle>
       </CardHeader>
       <CardContent>
-        {loading && <p className="text-sm text-muted-foreground">Loading...</p>}
+        {membersQuery.isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
+        {membersQuery.isError && (
+          <p className="text-sm text-destructive">Failed to load members</p>
+        )}
         {error && <p className="text-sm text-destructive">{error}</p>}
-        {!loading && members.length === 0 && (
+        {!membersQuery.isLoading && members.length === 0 && (
           <p className="text-sm text-muted-foreground">No members yet.</p>
         )}
-        {!loading && members.length > 0 && (
+        {!membersQuery.isLoading && members.length > 0 && (
           <ul className="divide-y divide-border">
             {members.map((member) => (
               <li key={member.userId} className="flex items-center justify-between py-3">
@@ -240,8 +236,12 @@ function MembersSection({ slug, role }: { slug: string; role: WorkspaceRole }) {
 }
 
 function InvitesSection({ slug, role }: { slug: string; role: WorkspaceRole }) {
-  const [invites, setInvites] = useState<WorkspaceInvite[]>([]);
-  const [loading, setLoading] = useState(true);
+  const canList = canWorkspace(role, 'workspace:invites:list');
+  const invitesQuery = useQuery({
+    ...workspaceInvitesQuery(slug),
+    enabled: canList,
+  });
+  const invites = invitesQuery.data ?? [];
   const [error, setError] = useState('');
   const [revokingId, setRevokingId] = useState<string | null>(null);
 
@@ -253,18 +253,6 @@ function InvitesSection({ slug, role }: { slug: string; role: WorkspaceRole }) {
   const [inviteUrl, setInviteUrl] = useState('');
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-
-  useEffect(() => {
-    if (!canWorkspace(role, 'workspace:invites:list')) {
-      setLoading(false);
-      return;
-    }
-
-    listWorkspaceInvites(slug)
-      .then(setInvites)
-      .catch(() => setError('Failed to load invites'))
-      .finally(() => setLoading(false));
-  }, [slug, role]);
 
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -280,7 +268,7 @@ function InvitesSection({ slug, role }: { slug: string; role: WorkspaceRole }) {
       const result = await createWorkspaceInvite(slug, trimmed, selectedRole);
       setInviteUrl(result.inviteUrl);
       setEmail('');
-      setInvites((prev) => [result.invite, ...prev]);
+      await invitesQuery.refetch();
     } catch (err: unknown) {
       if (err && typeof err === 'object' && 'error' in err && err.error && typeof err.error === 'object' && 'message' in err.error && typeof err.error.message === 'string') {
         setInviteError(err.error.message);
@@ -303,7 +291,7 @@ function InvitesSection({ slug, role }: { slug: string; role: WorkspaceRole }) {
     setRevokingId(inviteId);
     try {
       await revokeWorkspaceInvite(slug, inviteId);
-      setInvites((prev) => prev.filter((inv) => inv.id !== inviteId));
+      await invitesQuery.refetch();
     } catch {
       setError('Failed to revoke invite');
     } finally {
@@ -385,12 +373,15 @@ function InvitesSection({ slug, role }: { slug: string; role: WorkspaceRole }) {
           </div>
         )}
 
-        {loading && <p className="text-sm text-muted-foreground">Loading...</p>}
+        {invitesQuery.isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
+        {invitesQuery.isError && (
+          <p className="text-sm text-destructive">Failed to load invites</p>
+        )}
         {error && <p className="text-sm text-destructive">{error}</p>}
-        {!loading && !error && invites.length === 0 && (
+        {!invitesQuery.isLoading && !invitesQuery.isError && invites.length === 0 && (
           <p className="text-sm text-muted-foreground">No pending invites.</p>
         )}
-        {!loading && invites.length > 0 && (
+        {!invitesQuery.isLoading && invites.length > 0 && (
           <ul className="divide-y divide-border">
             {invites.map((inv) => (
               <li key={inv.id} className="flex items-center justify-between py-3">
