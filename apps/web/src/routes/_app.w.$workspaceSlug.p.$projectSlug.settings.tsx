@@ -1,4 +1,4 @@
-import { createFileRoute, getRouteApi, useNavigate, useRouter } from '@tanstack/react-router';
+import { createFileRoute, getRouteApi, useNavigate } from '@tanstack/react-router';
 import { useState, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
@@ -63,32 +63,26 @@ function GeneralSection({
   projectSlug: string;
   role: ProjectRole;
 }) {
-  const router = useRouter();
+  const queryClient = useQueryClient();
   const [isEditingName, setIsEditingName] = useState(false);
   const [name, setName] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
 
-  const handleSaveName = async (e: React.FormEvent) => {
+  const renameMutation = useMutation({
+    mutationFn: (nextName: string) => updateProject(workspaceSlug, projectSlug, { name: nextName }),
+    onSuccess: async () => {
+      setIsEditingName(false);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.project(workspaceSlug, projectSlug) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.projects(workspaceSlug) }),
+      ]);
+    },
+  });
+
+  const handleSaveName = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = name.trim();
     if (!trimmed) return;
-
-    setError('');
-    setSuccess('');
-    setIsLoading(true);
-
-    try {
-      await updateProject(workspaceSlug, projectSlug, { name: trimmed });
-      setSuccess('Name updated');
-      setIsEditingName(false);
-      await router.invalidate();
-    } catch {
-      setError('Failed to update project name');
-    } finally {
-      setIsLoading(false);
-    }
+    renameMutation.mutate(trimmed);
   };
 
   return (
@@ -109,8 +103,7 @@ function GeneralSection({
                   onClick={() => {
                     setIsEditingName(true);
                     setName(projectName);
-                    setError('');
-                    setSuccess('');
+                    renameMutation.reset();
                   }}
                 >
                   Edit
@@ -124,13 +117,13 @@ function GeneralSection({
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Project name"
-                disabled={isLoading}
+                disabled={renameMutation.isPending}
                 required
                 autoFocus
               />
               <div className="flex gap-2">
-                <Button type="submit" size="sm" disabled={isLoading || !name.trim()}>
-                  {isLoading ? 'Saving...' : 'Save'}
+                <Button type="submit" size="sm" disabled={renameMutation.isPending || !name.trim()}>
+                  {renameMutation.isPending ? 'Saving...' : 'Save'}
                 </Button>
                 <Button
                   type="button"
@@ -138,10 +131,9 @@ function GeneralSection({
                   size="sm"
                   onClick={() => {
                     setIsEditingName(false);
-                    setError('');
-                    setSuccess('');
+                    renameMutation.reset();
                   }}
-                  disabled={isLoading}
+                  disabled={renameMutation.isPending}
                 >
                   Cancel
                 </Button>
@@ -150,8 +142,10 @@ function GeneralSection({
           )}
         </div>
 
-        {error && <p className="text-sm text-destructive">{error}</p>}
-        {success && <p className="text-sm text-green-600">{success}</p>}
+        {renameMutation.isError && (
+          <p className="text-sm text-destructive">Failed to update project name</p>
+        )}
+        {renameMutation.isSuccess && <p className="text-sm text-green-600">Name updated</p>}
 
         <div>
           <Label className="text-sm text-muted-foreground">Slug</Label>
@@ -413,29 +407,27 @@ function DangerZoneSection({
   projectSlug: string;
 }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [showConfirm, setShowConfirm] = useState(false);
   const [confirmation, setConfirmation] = useState('');
-  const [isDeleting, setIsDeleting] = useState(false);
-  const [error, setError] = useState('');
 
   const expectedConfirmation = `Delete ${projectName}`;
 
-  const handleDelete = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (confirmation !== expectedConfirmation) return;
-
-    setError('');
-    setIsDeleting(true);
-
-    try {
-      await deleteProject(workspaceSlug, projectSlug, confirmation);
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteProject(workspaceSlug, projectSlug, confirmation),
+    onSuccess: async () => {
+      // Drop the removed project from any cached project lists before leaving.
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projects(workspaceSlug) });
       // Resolve next destination after deletion
       const target = await resolveProject();
       await navigate(target);
-    } catch {
-      setError('Failed to delete project');
-      setIsDeleting(false);
-    }
+    },
+  });
+
+  const handleDelete = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (confirmation !== expectedConfirmation) return;
+    deleteMutation.mutate();
   };
 
   return (
@@ -470,18 +462,20 @@ function DangerZoneSection({
               value={confirmation}
               onChange={(e) => setConfirmation(e.target.value)}
               placeholder={expectedConfirmation}
-              disabled={isDeleting}
+              disabled={deleteMutation.isPending}
               autoFocus
             />
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {deleteMutation.isError && (
+              <p className="text-sm text-destructive">Failed to delete project</p>
+            )}
             <div className="flex gap-2">
               <Button
                 type="submit"
                 variant="destructive"
                 size="sm"
-                disabled={isDeleting || confirmation !== expectedConfirmation}
+                disabled={deleteMutation.isPending || confirmation !== expectedConfirmation}
               >
-                {isDeleting ? 'Deleting...' : 'Permanently delete'}
+                {deleteMutation.isPending ? 'Deleting...' : 'Permanently delete'}
               </Button>
               <Button
                 type="button"
@@ -490,9 +484,9 @@ function DangerZoneSection({
                 onClick={() => {
                   setShowConfirm(false);
                   setConfirmation('');
-                  setError('');
+                  deleteMutation.reset();
                 }}
-                disabled={isDeleting}
+                disabled={deleteMutation.isPending}
               >
                 Cancel
               </Button>
