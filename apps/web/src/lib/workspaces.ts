@@ -1,36 +1,52 @@
-import { apiFetch } from './api';
-import type { WorkspaceRole } from './permissions';
+import { apiFetch, apiFetchParsed } from './api';
+import {
+  workspaceSchema,
+  workspaceWithRoleSchema,
+  workspaceMemberSchema,
+  workspaceInviteSchema,
+  workspaceInviteCreateResultSchema,
+  workspaceInviteMetadataSchema,
+  workspaceInviteAcceptResultSchema,
+  type Workspace,
+  type WorkspaceWithRole,
+  type WorkspaceMember,
+  type WorkspaceInvite,
+  type WorkspaceInviteStatus,
+  type WorkspaceInviteCreateResult,
+  type WorkspaceInviteMetadata,
+  type WorkspaceInviteAcceptResult,
+} from '@repo/shared';
 import type { ProjectWithRole } from './projects';
 
-export interface Workspace {
-  id: string;
-  name: string;
-  slug: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface WorkspaceWithRole extends Workspace {
-  role: WorkspaceRole;
-}
+// Response types are inferred from the shared API-contract schemas
+// (@repo/shared) — the single source of truth for these shapes.
+export type {
+  Workspace,
+  WorkspaceWithRole,
+  WorkspaceMember,
+  WorkspaceInvite,
+  WorkspaceInviteStatus,
+  WorkspaceInviteCreateResult,
+  WorkspaceInviteMetadata,
+};
 
 export async function createWorkspace(name: string): Promise<Workspace> {
-  return apiFetch<Workspace>('/api/workspaces', {
+  return apiFetchParsed('/api/workspaces', workspaceSchema, {
     method: 'POST',
     body: JSON.stringify({ name }),
   });
 }
 
 export async function listWorkspaces(): Promise<WorkspaceWithRole[]> {
-  return apiFetch<WorkspaceWithRole[]>('/api/workspaces');
+  return apiFetchParsed('/api/workspaces', workspaceWithRoleSchema.array());
 }
 
 export async function getWorkspace(slug: string): Promise<WorkspaceWithRole> {
-  return apiFetch<WorkspaceWithRole>(`/api/workspaces/${slug}`);
+  return apiFetchParsed(`/api/workspaces/${slug}`, workspaceWithRoleSchema);
 }
 
 export async function updateWorkspace(slug: string, name: string): Promise<Workspace> {
-  return apiFetch<Workspace>(`/api/workspaces/${slug}`, {
+  return apiFetchParsed(`/api/workspaces/${slug}`, workspaceSchema, {
     method: 'PATCH',
     body: JSON.stringify({ name }),
   });
@@ -45,16 +61,8 @@ export async function deleteWorkspace(slug: string, confirmation: string): Promi
 
 // --- Members ---
 
-export interface WorkspaceMember {
-  userId: string;
-  role: WorkspaceRole;
-  createdAt: string;
-  name: string;
-  email: string;
-}
-
 export async function listWorkspaceMembers(slug: string): Promise<WorkspaceMember[]> {
-  return apiFetch<WorkspaceMember[]>(`/api/workspaces/${slug}/members`);
+  return apiFetchParsed(`/api/workspaces/${slug}/members`, workspaceMemberSchema.array());
 }
 
 export async function removeWorkspaceMember(slug: string, userId: string): Promise<void> {
@@ -65,29 +73,12 @@ export async function removeWorkspaceMember(slug: string, userId: string): Promi
 
 // --- Invites ---
 
-export type WorkspaceInviteStatus = 'pending' | 'accepted' | 'revoked';
-
-export interface WorkspaceInvite {
-  id: string;
-  email: string;
-  role: 'manager' | 'member';
-  status: WorkspaceInviteStatus;
-  expiresAt: string;
-  createdAt: string;
-  invitedByName: string;
-}
-
-export interface WorkspaceInviteCreateResult {
-  invite: WorkspaceInvite;
-  inviteUrl: string;
-}
-
 export async function listWorkspaceInvites(slug: string): Promise<WorkspaceInvite[]> {
-  return apiFetch<WorkspaceInvite[]>(`/api/workspaces/${slug}/invites`);
+  return apiFetchParsed(`/api/workspaces/${slug}/invites`, workspaceInviteSchema.array());
 }
 
 export async function createWorkspaceInvite(slug: string, email: string, role: 'manager' | 'member'): Promise<WorkspaceInviteCreateResult> {
-  return apiFetch<WorkspaceInviteCreateResult>(`/api/workspaces/${slug}/invites`, {
+  return apiFetchParsed(`/api/workspaces/${slug}/invites`, workspaceInviteCreateResultSchema, {
     method: 'POST',
     body: JSON.stringify({ email, role }),
   });
@@ -101,21 +92,12 @@ export async function revokeWorkspaceInvite(slug: string, inviteId: string): Pro
 
 // --- Token-based Invites ---
 
-export interface WorkspaceInviteMetadata {
-  inviteId: string;
-  email: string;
-  status: WorkspaceInviteStatus;
-  expiresAt: string;
-  workspaceName: string;
-  workspaceSlug: string;
-}
-
 export async function getWorkspaceInviteByToken(token: string): Promise<WorkspaceInviteMetadata> {
-  return apiFetch<WorkspaceInviteMetadata>(`/api/workspace-invites/${token}`);
+  return apiFetchParsed(`/api/workspace-invites/${token}`, workspaceInviteMetadataSchema);
 }
 
-export async function acceptWorkspaceInviteByToken(token: string): Promise<{ workspaceId: string; workspaceSlug: string; workspaceName: string }> {
-  return apiFetch<{ workspaceId: string; workspaceSlug: string; workspaceName: string }>(`/api/workspace-invites/${token}/accept`, {
+export async function acceptWorkspaceInviteByToken(token: string): Promise<WorkspaceInviteAcceptResult> {
+  return apiFetchParsed(`/api/workspace-invites/${token}/accept`, workspaceInviteAcceptResultSchema, {
     method: 'POST',
   });
 }

@@ -1,5 +1,8 @@
+import type { Role } from '@repo/shared';
+
 // Workspace permissions
-export type WorkspaceRole = 'owner' | 'manager' | 'member';
+// Role ladder is owned by the shared API contract (`roleSchema` in @repo/shared).
+export type WorkspaceRole = Role;
 
 export type WorkspacePermission =
   | 'workspace:read'
