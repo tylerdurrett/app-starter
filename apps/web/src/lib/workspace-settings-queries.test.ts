@@ -34,6 +34,16 @@ function mockQueryClient() {
 // wrong slice of cache — fails loudly here rather than as a stale UI.
 describe('workspace-settings query factories', () => {
   describe('reads', () => {
+    it('detail query uses the shared workspace key', () => {
+      expect(mod.workspaceQueryOptions('acme').queryKey).toEqual(queryKeys.workspace('acme'));
+    });
+
+    it('scopes the detail read key by slug', () => {
+      expect(mod.workspaceQueryOptions('acme').queryKey).not.toEqual(
+        mod.workspaceQueryOptions('other').queryKey,
+      );
+    });
+
     it('members query uses the shared workspaceMembers key', () => {
       expect(mod.workspaceMembersQuery('acme').queryKey).toEqual(
         queryKeys.workspaceMembers('acme'),

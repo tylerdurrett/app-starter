@@ -7,11 +7,23 @@
 // just spreads the returned { queryKey, queryFn } into useQuery.
 import { queryKeys } from './query-keys';
 import {
+  getProject,
   listProjectMembers,
   listProjectInvites,
+  type ProjectWithWorkspace,
   type ProjectMember,
   type ProjectInvite,
 } from './projects';
+
+// Detail read: the layout loader seeds this key, so the settings component's
+// useQuery hits the cache on first paint and a rename's invalidation refreshes
+// the displayed name live (ADR-0007).
+export function projectQueryOptions(workspaceSlug: string, slug: string) {
+  return {
+    queryKey: queryKeys.project(workspaceSlug, slug),
+    queryFn: (): Promise<ProjectWithWorkspace> => getProject(workspaceSlug, slug),
+  };
+}
 
 export function projectMembersQueryOptions(workspaceSlug: string, slug: string) {
   return {

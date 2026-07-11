@@ -8,6 +8,7 @@
 import type { QueryClient } from '@tanstack/react-query';
 import { queryKeys } from './query-keys';
 import {
+  getWorkspace,
   listWorkspaceMembers,
   removeWorkspaceMember,
   listWorkspaceInvites,
@@ -18,6 +19,16 @@ import {
 } from './workspaces';
 
 // --- Reads ---
+
+// Detail read: the layout loader seeds this key, so the settings component's
+// useQuery hits the cache on first paint and a rename's invalidation refreshes
+// the displayed name live (ADR-0007).
+export function workspaceQueryOptions(slug: string) {
+  return {
+    queryKey: queryKeys.workspace(slug),
+    queryFn: () => getWorkspace(slug),
+  };
+}
 
 export function workspaceMembersQuery(slug: string) {
   return {
