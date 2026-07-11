@@ -1,5 +1,6 @@
 import { createFileRoute, getRouteApi, useNavigate, useRouter } from '@tanstack/react-router';
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
 import { useSession } from '../lib/auth-client';
 import { ApiError } from '../lib/api';
@@ -8,14 +9,12 @@ import { resolveProject } from '../lib/project-resolver';
 import {
   updateProject,
   deleteProject,
-  listProjectMembers,
   removeProjectMember,
-  listProjectInvites,
   createProjectInvite,
   revokeProjectInvite,
-  type ProjectMember,
-  type ProjectInvite,
 } from '../lib/projects';
+import { queryKeys } from '../lib/query-keys';
+import { projectMembersQueryOptions, projectInvitesQueryOptions } from '../lib/project-queries';
 import { Copy, UserMinus, X } from 'lucide-react';
 
 const projectRoute = getRouteApi('/_app/w/$workspaceSlug/p/$projectSlug');
@@ -166,39 +165,16 @@ function GeneralSection({
 function MembersSection({ workspaceSlug, slug, role }: { workspaceSlug: string; slug: string; role: ProjectRole }) {
   const session = useSession();
   const currentUserId = session.data?.user?.id;
+  const queryClient = useQueryClient();
 
-  const [members, setMembers] = useState<ProjectMember[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [removingId, setRemovingId] = useState<string | null>(null);
+  const membersQuery = useQuery(projectMembersQueryOptions(workspaceSlug, slug));
+  const members = membersQuery.data ?? [];
 
-  const fetchMembers = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      setMembers(await listProjectMembers(workspaceSlug, slug));
-    } catch {
-      setError('Failed to load members');
-    } finally {
-      setLoading(false);
-    }
-  }, [workspaceSlug, slug]);
-
-  useEffect(() => {
-    fetchMembers();
-  }, [fetchMembers]);
-
-  const handleRemove = async (userId: string) => {
-    setRemovingId(userId);
-    try {
-      await removeProjectMember(workspaceSlug, slug, userId);
-      setMembers((prev) => prev.filter((m) => m.userId !== userId));
-    } catch {
-      setError('Failed to remove member');
-    } finally {
-      setRemovingId(null);
-    }
-  };
+  const removeMutation = useMutation({
+    mutationFn: (userId: string) => removeProjectMember(workspaceSlug, slug, userId),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: queryKeys.projectMembers(workspaceSlug, slug) }),
+  });
 
   return (
     <Card>
@@ -206,12 +182,15 @@ function MembersSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
         <CardTitle>Members</CardTitle>
       </CardHeader>
       <CardContent>
-        {loading && <p className="text-sm text-muted-foreground">Loading...</p>}
-        {error && <p className="text-sm text-destructive">{error}</p>}
-        {!loading && !error && members.length === 0 && (
+        {membersQuery.isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
+        {membersQuery.isError && <p className="text-sm text-destructive">Failed to load members</p>}
+        {removeMutation.isError && (
+          <p className="text-sm text-destructive">Failed to remove member</p>
+        )}
+        {!membersQuery.isLoading && !membersQuery.isError && members.length === 0 && (
           <p className="text-sm text-muted-foreground">No members found.</p>
         )}
-        {!loading && members.length > 0 && (
+        {!membersQuery.isLoading && members.length > 0 && (
           <ul className="divide-y divide-border">
             {members.map((member) => {
               const isCurrentUser = member.userId === currentUserId;
@@ -234,8 +213,10 @@ function MembersSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
                       <Button
                         variant="ghost"
                         size="icon"
-                        onClick={() => handleRemove(member.userId)}
-                        disabled={removingId === member.userId}
+                        onClick={() => removeMutation.mutate(member.userId)}
+                        disabled={
+                          removeMutation.isPending && removeMutation.variables === member.userId
+                        }
                         title="Remove member"
                       >
                         <UserMinus className="w-4 h-4 text-destructive" />
@@ -253,63 +234,53 @@ function MembersSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
 }
 
 function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; slug: string; role: ProjectRole }) {
-  const [invites, setInvites] = useState<ProjectInvite[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const queryClient = useQueryClient();
 
   const [showInviteForm, setShowInviteForm] = useState(false);
   const [email, setEmail] = useState('');
   const [selectedRole, setSelectedRole] = useState<'manager' | 'member'>('member');
-  const [isInviting, setIsInviting] = useState(false);
-  const [inviteError, setInviteError] = useState('');
   const [inviteUrl, setInviteUrl] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const [revokingId, setRevokingId] = useState<string | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => () => clearTimeout(copyTimerRef.current), []);
 
-  const fetchInvites = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      setInvites(await listProjectInvites(workspaceSlug, slug));
-    } catch {
-      setError('Failed to load invites');
-    } finally {
-      setLoading(false);
-    }
-  }, [workspaceSlug, slug]);
+  const invitesQuery = useQuery(projectInvitesQueryOptions(workspaceSlug, slug));
+  const invites = invitesQuery.data ?? [];
 
-  useEffect(() => {
-    fetchInvites();
-  }, [fetchInvites]);
+  const invalidateInvites = () =>
+    queryClient.invalidateQueries({ queryKey: queryKeys.projectInvites(workspaceSlug, slug) });
 
-  const handleInvite = async (e: React.FormEvent) => {
+  const createMutation = useMutation({
+    mutationFn: (trimmedEmail: string) =>
+      createProjectInvite(workspaceSlug, slug, trimmedEmail, selectedRole),
+    onSuccess: (result) => {
+      setInviteUrl(result.inviteUrl);
+      setEmail('');
+      return invalidateInvites();
+    },
+  });
+
+  const revokeMutation = useMutation({
+    mutationFn: (inviteId: string) => revokeProjectInvite(workspaceSlug, slug, inviteId),
+    onSuccess: () => invalidateInvites(),
+  });
+
+  const inviteError =
+    createMutation.error instanceof ApiError && createMutation.error.status === 409
+      ? createMutation.error.parsedMessage || 'Invite conflict'
+      : createMutation.error
+        ? 'Failed to create invite'
+        : '';
+
+  const handleInvite = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = email.trim();
     if (!trimmed) return;
-
-    setInviteError('');
     setInviteUrl('');
     setCopied(false);
-    setIsInviting(true);
-
-    try {
-      const result = await createProjectInvite(workspaceSlug, slug, trimmed, selectedRole);
-      setInviteUrl(result.inviteUrl);
-      setEmail('');
-      setInvites((prev) => [result.invite, ...prev]);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        setInviteError(err.parsedMessage || 'Invite conflict');
-      } else {
-        setInviteError('Failed to create invite');
-      }
-    } finally {
-      setIsInviting(false);
-    }
+    createMutation.mutate(trimmed);
   };
 
   const handleCopy = async () => {
@@ -319,25 +290,13 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
     copyTimerRef.current = setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleRevoke = async (inviteId: string) => {
-    setRevokingId(inviteId);
-    try {
-      await revokeProjectInvite(workspaceSlug, slug, inviteId);
-      setInvites((prev) => prev.filter((inv) => inv.id !== inviteId));
-    } catch {
-      setError('Failed to revoke invite');
-    } finally {
-      setRevokingId(null);
-    }
-  };
-
   const resetInviteForm = () => {
     setShowInviteForm(false);
     setEmail('');
     setSelectedRole('member');
-    setInviteError('');
     setInviteUrl('');
     setCopied(false);
+    createMutation.reset();
   };
 
   return (
@@ -362,7 +321,7 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="colleague@example.com"
-                  disabled={isInviting}
+                  disabled={createMutation.isPending}
                   required
                   autoFocus
                   className="flex-1"
@@ -370,7 +329,7 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
                 <select
                   value={selectedRole}
                   onChange={(e) => setSelectedRole(e.target.value as 'manager' | 'member')}
-                  disabled={isInviting}
+                  disabled={createMutation.isPending}
                   className="px-3 py-2 text-sm border rounded-md bg-background"
                 >
                   <option value="member">Member</option>
@@ -378,15 +337,15 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
                 </select>
               </div>
               <div className="flex gap-2">
-                <Button type="submit" size="sm" disabled={isInviting || !email.trim()}>
-                  {isInviting ? 'Sending...' : 'Send'}
+                <Button type="submit" size="sm" disabled={createMutation.isPending || !email.trim()}>
+                  {createMutation.isPending ? 'Sending...' : 'Send'}
                 </Button>
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
                   onClick={resetInviteForm}
-                  disabled={isInviting}
+                  disabled={createMutation.isPending}
                 >
                   Cancel
                 </Button>
@@ -405,12 +364,15 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
           </div>
         )}
 
-        {loading && <p className="text-sm text-muted-foreground">Loading...</p>}
-        {error && <p className="text-sm text-destructive">{error}</p>}
-        {!loading && !error && invites.length === 0 && (
+        {invitesQuery.isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
+        {invitesQuery.isError && <p className="text-sm text-destructive">Failed to load invites</p>}
+        {revokeMutation.isError && (
+          <p className="text-sm text-destructive">Failed to revoke invite</p>
+        )}
+        {!invitesQuery.isLoading && !invitesQuery.isError && invites.length === 0 && (
           <p className="text-sm text-muted-foreground">No pending invites.</p>
         )}
-        {!loading && invites.length > 0 && (
+        {!invitesQuery.isLoading && invites.length > 0 && (
           <ul className="divide-y divide-border">
             {invites.map((inv) => (
               <li key={inv.id} className="flex items-center justify-between py-3">
@@ -425,8 +387,8 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => handleRevoke(inv.id)}
-                    disabled={revokingId === inv.id}
+                    onClick={() => revokeMutation.mutate(inv.id)}
+                    disabled={revokeMutation.isPending && revokeMutation.variables === inv.id}
                     title="Revoke invite"
                   >
                     <X className="w-4 h-4 text-destructive" />
