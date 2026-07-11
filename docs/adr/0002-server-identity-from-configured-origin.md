@@ -1,6 +1,6 @@
 # ADR-0002 — Server identity comes from configured origin, never from request headers
 
-- **Date:** 2026-07-09 (retroactive; decision inherited from the parent codebase, `data-ingest` commit `20ff561`, 2026-04-24)
+- **Date:** 2026-07-09 (retroactive; inherited decision originally established 2026-04-24)
 - **Status:** Accepted
 
 ## Context
