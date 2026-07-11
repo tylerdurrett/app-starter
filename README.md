@@ -1,101 +1,47 @@
 # App Starter
 
-A full-stack TypeScript starter template:
+A full-stack TypeScript starter for multi-tenant apps — auth, two-level tenancy,
+a pluggable integrations framework, and an MCP connector surface, all wired up.
 
-- **Monorepo** — Turborepo + pnpm workspaces
-- **Web** — Vite + React 19 + TanStack Router (`apps/web`)
-- **Server** — Fastify (`apps/server`)
-- **Auth** — better-auth email/password with email verification and password reset
-- **MCP** — OAuth 2.1 provider + Model Context Protocol server with scoped tools
-- **Tenancy** — workspaces and projects
-- **Integrations** — pluggable integrations framework (`packages/integrations-core`) with Slack as the reference connector
-- **Database** — Drizzle ORM + Postgres, via the bundled docker-compose or any Postgres (e.g., Supabase)
-- **UI** — Base UI + shadcn-pattern components in `@repo/ui`, Tailwind CSS v4
+## Getting started
 
-## Prerequisites
-
-- Node.js
-- pnpm
-- Docker (or an external Postgres)
-
-## Setup
+Prerequisites: Node.js, pnpm, and Docker (or an external Postgres).
 
 ```sh
 pnpm install
-pnpm hello     # configure server + web + database ports
+pnpm hello     # pick server/web/db ports → writes project.config.json + .env
+pnpm go        # start Postgres, run migrations, launch server + web
 ```
 
-## Development
+- Web: http://localhost:5200
+- Server health: http://localhost:5100/health
+- `pnpm stop` stops server + web; Postgres keeps running.
 
-```sh
-pnpm go        # start everything (Postgres, migrations, server, web)
-pnpm stop      # stop server + web (leaves Postgres running)
-```
+Ports live in `project.config.json` (defaults may differ — `pnpm hello` sets them).
 
-- Web app: `http://localhost:5200`
-- Server: `http://localhost:5100/health`
-- Ports are defined in `project.config.json` — `pnpm hello` writes them there.
+## What's inside
 
-## Production-like HTTPS Dev over Tailscale
+- **Monorepo** — Turborepo + pnpm workspaces (`apps/*`, `packages/*`)
+- **Web** — Vite + React 19, TanStack Router + Query, Tailwind v4, Base UI components (`@repo/ui`)
+- **Server** — Fastify + Drizzle ORM + Postgres
+- **Auth** — better-auth email/password with verification and password reset
+- **Tenancy** — workspaces → projects with role-based membership
+- **MCP** — self-hosted OAuth 2.1 provider + Model Context Protocol server with scoped tools
+- **Integrations** — pluggable framework (`packages/integrations-core`), Slack as the reference connector
 
-Strict OAuth clients require the authorization-server issuer, token `iss`, and
-MCP resource metadata to agree on the same HTTPS API origin. To keep local dev
-close to production, serve the frontend and API as separate HTTPS origins through
-[Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve):
+## Commands
 
-- Web: `https://<machine>.<tailnet>.ts.net:5200`
-- API/Auth/MCP: `https://<machine>.<tailnet>.ts.net`
+`pnpm go` covers the common path. Also: `pnpm dev`, `pnpm build`, `pnpm lint`,
+`pnpm test`, and the `pnpm db:*` family (`db:reset`, `db:migrate`, `db:seed`,
+`db:studio`). Run `pnpm run` to list everything.
 
-1. Enable MagicDNS and HTTPS certificates for the tailnet in Tailscale.
-2. Start the app locally with `pnpm go`.
-3. Start the HTTPS reverse proxies with `pnpm tailscale:serve`.
-4. Set these values in `.env`, replacing the host with this machine's MagicDNS name:
+> Never run `drizzle-kit push` — schema changes go through `pnpm db:generate`
+> (commit the migration) then `pnpm db:migrate`.
 
-```sh
-VITE_SERVER_URL=https://<machine>.<tailnet>.ts.net
-CORS_ORIGIN=https://<machine>.<tailnet>.ts.net:5200
-BETTER_AUTH_URL=https://<machine>.<tailnet>.ts.net
-MCP_CANONICAL_URL=https://<machine>.<tailnet>.ts.net/mcp
-VITE_ALLOWED_HOSTS=<machine>.<tailnet>.ts.net
-```
+## Docs
 
-Then restart `pnpm go` and open the web app at
-`https://<machine>.<tailnet>.ts.net:5200`.
-
-For production, use the same model with real domains, for example
-`https://app.example.com` for the static frontend and `https://api.example.com`
-for API/Auth/MCP.
-
-## MCP Surface
-
-The MCP server identifies itself as `App Starter` during initialization.
-Current tools:
-
-- `list_workspaces` — lists workspaces the authenticated user belongs to
-  (requires the `workspaces:read` scope)
-- `list_projects` — lists projects the authenticated user can access, optionally
-  filtered by workspace slug (requires the `projects:read` scope)
-
-If a valid token is missing a tool scope, `/mcp` returns HTTP 403 with an
-`insufficient_scope` challenge.
-
-## Individual Commands
-
-| Command                       | Description                                                                       |
-| ----------------------------- | --------------------------------------------------------------------------------- |
-| `pnpm hello`                  | Interactive port setup (`project.config.json` + `.env`)                           |
-| `pnpm go`                     | Full dev startup: ensure config → wait for DB → migrate → free ports → run dev    |
-| `pnpm stop`                   | Kill server + web dev processes (not the DB container)                            |
-| `pnpm dev`                    | Start server + web (assumes Postgres is running and migrated)                     |
-| `pnpm build`                  | Build all packages                                                                |
-| `pnpm lint`                   | Lint all packages                                                                 |
-| `pnpm test`                   | Run tests (assumes Postgres is running)                                           |
-| `pnpm db:start`               | Start local Postgres (Docker)                                                     |
-| `pnpm db:stop`                | Stop local Postgres (Docker)                                                      |
-| `pnpm db:reset`               | Destroy volume + recreate Postgres, then migrate + seed                           |
-| `pnpm db:migrate`             | Apply pending Drizzle migrations                                                  |
-| `pnpm db:seed`                | Seed the database with test data                                                  |
-| `pnpm db:studio`              | Open Drizzle Studio (schema + data browser)                                       |
-| `pnpm tailscale:serve`        | Share web and API dev servers inside your tailnet over HTTPS with Tailscale Serve |
-| `pnpm tailscale:serve:status` | Show current Tailscale Serve config                                               |
-| `pnpm tailscale:serve:reset`  | Clear Tailscale Serve config                                                      |
+- [CONTEXT.md](CONTEXT.md) — domain language and the tenancy model
+- [docs/adr/](docs/adr/) — architecture decision records
+- [MCP surface](docs/mcp.md) — the connector's tools and scopes
+- [HTTPS dev over Tailscale](docs/dev-https-tailscale.md) — production-like local OAuth
+- [Agent workflow](docs/agents/README.md) — how specs flow from idea to ship
