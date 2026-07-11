@@ -1,20 +1,37 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from './query-keys';
-import { projectMembersQueryOptions, projectInvitesQueryOptions } from './project-queries';
+import {
+  projectQueryOptions,
+  projectMembersQueryOptions,
+  projectInvitesQueryOptions,
+} from './project-queries';
 
 // The projects lib fetchers are the network boundary; mock them so these tests
 // stay pure functions (apps/web has no jsdom/renderHook infra). We assert two
 // things per factory: the returned queryKey is the exact shared tuple, and the
 // queryFn delegates to the right fetcher with the right (workspaceSlug, slug).
 vi.mock('./projects', () => ({
+  getProject: vi.fn().mockResolvedValue({ name: 'Web', slug: 'web' }),
   listProjectMembers: vi.fn().mockResolvedValue([{ userId: 'u1' }]),
   listProjectInvites: vi.fn().mockResolvedValue([{ id: 'i1' }]),
 }));
 
-import { listProjectMembers, listProjectInvites } from './projects';
+import { getProject, listProjectMembers, listProjectInvites } from './projects';
 
 afterEach(() => {
   vi.clearAllMocks();
+});
+
+describe('projectQueryOptions', () => {
+  it('uses the shared project detail query key', () => {
+    expect(projectQueryOptions('acme', 'web').queryKey).toEqual(queryKeys.project('acme', 'web'));
+  });
+
+  it('queryFn calls getProject with the workspace and project slug', async () => {
+    const result = await projectQueryOptions('acme', 'web').queryFn();
+    expect(getProject).toHaveBeenCalledWith('acme', 'web');
+    expect(result).toEqual({ name: 'Web', slug: 'web' });
+  });
 });
 
 describe('projectMembersQueryOptions', () => {

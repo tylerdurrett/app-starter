@@ -5,6 +5,7 @@ import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '
 import { canWorkspace, type WorkspaceRole } from '../lib/permissions';
 import { resolveProject } from '../lib/project-resolver';
 import {
+  workspaceQueryOptions,
   workspaceMembersQuery,
   workspaceInvitesQuery,
   renameWorkspaceMutation,
@@ -39,42 +40,38 @@ export const Route = createFileRoute('/_app/w/$workspaceSlug/settings')({
 });
 
 function WorkspaceSettingsPage() {
+  // Loader data is gating-derived only: slug/role don't change on this page.
+  // The mutable display name is read via useQuery in each section (seeded by
+  // the layout loader) so a rename refreshes live (ADR-0007).
   const { workspace } = workspaceRoute.useLoaderData();
-  const { role } = workspace;
+  const { slug, role } = workspace;
 
   return (
     <div className="p-8">
       <div className="max-w-3xl mx-auto space-y-6">
         <h1 className="text-3xl font-bold">Workspace Settings</h1>
 
-        <GeneralSection
-          workspaceName={workspace.name}
-          workspaceSlug={workspace.slug}
-          role={role}
-        />
-        <MembersSection slug={workspace.slug} role={role} />
-        <InvitesSection slug={workspace.slug} role={role} />
-        {canWorkspace(role, 'workspace:delete') && (
-          <DangerZoneSection
-            workspaceName={workspace.name}
-            workspaceSlug={workspace.slug}
-          />
-        )}
+        <GeneralSection workspaceSlug={slug} role={role} />
+        <MembersSection slug={slug} role={role} />
+        <InvitesSection slug={slug} role={role} />
+        {canWorkspace(role, 'workspace:delete') && <DangerZoneSection workspaceSlug={slug} />}
       </div>
     </div>
   );
 }
 
 function GeneralSection({
-  workspaceName,
   workspaceSlug,
   role,
 }: {
-  workspaceName: string;
   workspaceSlug: string;
   role: WorkspaceRole;
 }) {
   const queryClient = useQueryClient();
+  // Read the mutable name through the loader-seeded cache so the rename
+  // invalidation below refreshes it without a page reload (ADR-0007).
+  const workspaceQuery = useQuery(workspaceQueryOptions(workspaceSlug));
+  const workspaceName = workspaceQuery.data?.name ?? '';
   const [isEditing, setIsEditing] = useState(false);
   const [name, setName] = useState('');
   const renameMutation = useMutation(renameWorkspaceMutation(queryClient, workspaceSlug));
@@ -389,15 +386,13 @@ function InvitesSection({ slug, role }: { slug: string; role: WorkspaceRole }) {
   );
 }
 
-function DangerZoneSection({
-  workspaceName,
-  workspaceSlug,
-}: {
-  workspaceName: string;
-  workspaceSlug: string;
-}) {
+function DangerZoneSection({ workspaceSlug }: { workspaceSlug: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  // The delete-confirmation phrase embeds the live name, so read it from the
+  // loader-seeded cache too (ADR-0007) — a rename keeps the phrase in sync.
+  const workspaceQuery = useQuery(workspaceQueryOptions(workspaceSlug));
+  const workspaceName = workspaceQuery.data?.name ?? '';
   const [showConfirm, setShowConfirm] = useState(false);
   const [confirmation, setConfirmation] = useState('');
   const deleteMutation = useMutation(deleteWorkspaceMutation(queryClient, workspaceSlug));

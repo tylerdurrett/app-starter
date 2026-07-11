@@ -9,21 +9,22 @@ import { AlertCircle } from 'lucide-react';
 const workspaceRoute = getRouteApi('/_app/w/$workspaceSlug');
 
 export const Route = createFileRoute('/_app/w/$workspaceSlug/integrations/$integrationId')({
-  // Loader gates only (ADR-0007): it fetches the integration solely to derive
-  // its type -> registry entry (unknown type / 404 -> notFound) and returns
-  // just the registry `entry`. The integration itself is server state the
-  // component reads through TanStack Query, so no server data flows in as
-  // loader render state. (Seeding the cache from here would require wiring
-  // queryClient into the router context, which is out of scope and would
-  // collide with sibling work on main.tsx; the loader's extra fetch for gating
-  // is the accepted tradeoff.)
-  loader: async ({ params }) => {
+  // Loader gates AND seeds (ADR-0007): it fetches the integration once to
+  // derive its type -> registry entry (unknown type / 404 -> notFound) and
+  // seeds that same fetched value into the query cache, so the component's
+  // useQuery hits the cache instead of re-fetching. Only the gating-derived
+  // registry `entry` (non-mutating) flows in as loader render state.
+  loader: async ({ params, context }) => {
     try {
       const integration = await getIntegration(params.workspaceSlug, params.integrationId);
       const entry = getRegistryEntry(integration.type);
       if (!entry) {
         throw notFound();
       }
+      context.queryClient.setQueryData(
+        queryKeys.integration(params.workspaceSlug, params.integrationId),
+        integration,
+      );
       return { entry };
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {

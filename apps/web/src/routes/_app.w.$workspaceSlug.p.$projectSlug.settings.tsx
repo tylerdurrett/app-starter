@@ -14,7 +14,11 @@ import {
   revokeProjectInvite,
 } from '../lib/projects';
 import { queryKeys } from '../lib/query-keys';
-import { projectMembersQueryOptions, projectInvitesQueryOptions } from '../lib/project-queries';
+import {
+  projectQueryOptions,
+  projectMembersQueryOptions,
+  projectInvitesQueryOptions,
+} from '../lib/project-queries';
 import { Copy, UserMinus, X } from 'lucide-react';
 
 const projectRoute = getRouteApi('/_app/w/$workspaceSlug/p/$projectSlug');
@@ -24,28 +28,22 @@ export const Route = createFileRoute('/_app/w/$workspaceSlug/p/$projectSlug/sett
 });
 
 function ProjectSettingsPage() {
+  // Loader data is gating-derived only: workspaceSlug/slug/role don't change on
+  // this page. The mutable display name is read via useQuery in each section
+  // (seeded by the layout loader) so a rename refreshes live (ADR-0007).
   const { project } = projectRoute.useLoaderData();
-  const { role } = project;
+  const { workspaceSlug, slug, role } = project;
 
   return (
     <div className="p-8">
       <div className="max-w-3xl mx-auto space-y-6">
         <h1 className="text-3xl font-bold">Settings</h1>
 
-        <GeneralSection
-          workspaceSlug={project.workspaceSlug}
-          projectName={project.name}
-          projectSlug={project.slug}
-          role={role}
-        />
-        <MembersSection workspaceSlug={project.workspaceSlug} slug={project.slug} role={role} />
-        <InvitesSection workspaceSlug={project.workspaceSlug} slug={project.slug} role={role} />
+        <GeneralSection workspaceSlug={workspaceSlug} projectSlug={slug} role={role} />
+        <MembersSection workspaceSlug={workspaceSlug} slug={slug} role={role} />
+        <InvitesSection workspaceSlug={workspaceSlug} slug={slug} role={role} />
         {canProject(role, 'project:delete') && (
-          <DangerZoneSection
-            workspaceSlug={project.workspaceSlug}
-            projectName={project.name}
-            projectSlug={project.slug}
-          />
+          <DangerZoneSection workspaceSlug={workspaceSlug} projectSlug={slug} />
         )}
       </div>
     </div>
@@ -54,16 +52,18 @@ function ProjectSettingsPage() {
 
 function GeneralSection({
   workspaceSlug,
-  projectName,
   projectSlug,
   role,
 }: {
   workspaceSlug: string;
-  projectName: string;
   projectSlug: string;
   role: ProjectRole;
 }) {
   const queryClient = useQueryClient();
+  // Read the mutable name through the loader-seeded cache so the rename
+  // invalidation below refreshes it without a page reload (ADR-0007).
+  const projectQuery = useQuery(projectQueryOptions(workspaceSlug, projectSlug));
+  const projectName = projectQuery.data?.name ?? '';
   const [isEditingName, setIsEditingName] = useState(false);
   const [name, setName] = useState('');
 
@@ -399,15 +399,17 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
 
 function DangerZoneSection({
   workspaceSlug,
-  projectName,
   projectSlug,
 }: {
   workspaceSlug: string;
-  projectName: string;
   projectSlug: string;
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  // The delete-confirmation phrase embeds the live name, so read it from the
+  // loader-seeded cache too (ADR-0007) — a rename keeps the phrase in sync.
+  const projectQuery = useQuery(projectQueryOptions(workspaceSlug, projectSlug));
+  const projectName = projectQuery.data?.name ?? '';
   const [showConfirm, setShowConfirm] = useState(false);
   const [confirmation, setConfirmation] = useState('');
 
