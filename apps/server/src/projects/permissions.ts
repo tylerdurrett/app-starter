@@ -1,4 +1,6 @@
-export type ProjectRole = 'owner' | 'manager' | 'member';
+import type { TenancyRole } from '../tenancy/index.js';
+
+export type ProjectRole = TenancyRole;
 
 export type ProjectPermission =
   | 'project:read'
