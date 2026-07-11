@@ -12,6 +12,38 @@ import {
 } from '../tenancy/index.js';
 import { resolveWorkspaceAndRole } from './service.js';
 import type { WorkspacePermission } from './permissions.js';
+import type { WorkspaceInvite } from '@repo/shared';
+
+/**
+ * Project a freshly-created invite row onto the shared `WorkspaceInvite`
+ * contract. The shared invite lifecycle types its tables as bare PgTable
+ * (#66), so the returned row is loosely typed; this mapper is the single
+ * place that narrows it to the client-facing column allow-list
+ * (id/email/role/status/expiresAt/createdAt) and converts Date→ISO string.
+ * Internal columns (tokenHash, workspaceId/invitedByUserId FKs) are dropped.
+ *
+ * `invitedByName` is supplied explicitly by the caller — the raw insert row
+ * carries `invitedByUserId`, not the joined actor name.
+ */
+export function toWorkspaceInvite(row: unknown, invitedByName: string): WorkspaceInvite {
+  const invite = row as {
+    id: string;
+    email: string;
+    role: string;
+    status: string;
+    expiresAt: Date;
+    createdAt: Date;
+  };
+  return {
+    id: invite.id,
+    email: invite.email,
+    role: invite.role as WorkspaceInvite['role'],
+    status: invite.status as WorkspaceInvite['status'],
+    expiresAt: invite.expiresAt.toISOString(),
+    createdAt: invite.createdAt.toISOString(),
+    invitedByName,
+  };
+}
 
 /** Token-metadata projection returned by getInviteByToken for the workspace level. */
 interface WorkspaceInviteTokenMeta {

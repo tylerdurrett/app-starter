@@ -18,7 +18,7 @@ import {
   removeMember,
   listProjectsForWorkspace,
 } from '../workspaces/service.js';
-import { listInvites, createInvite, revokeInvite } from '../workspaces/invites.js';
+import { listInvites, createInvite, revokeInvite, toWorkspaceInvite } from '../workspaces/invites.js';
 import type { AssertWire, Elem, WireContract } from '../workspaces/wire-contract.js';
 
 // Compile-time contract: the workspace route replies below serialize to the
@@ -127,29 +127,11 @@ const workspaceRoutes: FastifyPluginAsync = async (app) => {
         role: request.body.role
       });
       const inviteUrl = `${config.webOrigin}/invite/workspace/${token}`;
-      // The shared invite lifecycle types its tables as bare PgTable (#66), so
-      // the returned row is loosely typed; narrow it to the columns we project.
-      const row = invite as unknown as {
-        id: string;
-        email: string;
-        role: string;
-        status: string;
-        expiresAt: Date;
-        createdAt: Date;
-      };
-      // Project onto the shared contract: the raw row omits invitedByName (the
-      // actor created it) and carries internal columns (tokenHash, FKs) that
-      // must not leak to the client.
+      // Project onto the shared contract via the single named mapper, which
+      // absorbs the loose PgTable narrowing (#66) and drops internal columns
+      // (tokenHash, FKs). invitedByName comes from the acting user.
       const result: WorkspaceInviteCreateResult = {
-        invite: {
-          id: row.id,
-          email: row.email,
-          role: row.role as WorkspaceInvite['role'],
-          status: row.status as WorkspaceInvite['status'],
-          expiresAt: row.expiresAt.toISOString(),
-          createdAt: row.createdAt.toISOString(),
-          invitedByName: user.name,
-        },
+        invite: toWorkspaceInvite(invite, user.name),
         inviteUrl,
       };
       return reply.status(201).send(result);
