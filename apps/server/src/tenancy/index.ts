@@ -10,3 +10,6 @@ export {
   acceptInvite,
 } from './invites.js';
 export type { InviteLifecycleConfig, InviteTokenMeta, ResolveEntity } from './invites.js';
+export { slugify, ensureUniqueSlug } from './slug.js';
+export { can } from './permissions.js';
+export type { PermissionMatrix } from './permissions.js';

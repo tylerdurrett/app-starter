@@ -1,4 +1,5 @@
-import type { TenancyRole } from '../tenancy/index.js';
+import { can as sharedCan } from '../tenancy/index.js';
+import type { PermissionMatrix, TenancyRole } from '../tenancy/index.js';
 
 export type ProjectRole = TenancyRole;
 
@@ -12,7 +13,7 @@ export type ProjectPermission =
   | 'project:invites:list'
   | 'project:invites:revoke';
 
-export const PROJECT_PERMISSIONS: Record<ProjectRole, Set<ProjectPermission>> = {
+export const PROJECT_PERMISSIONS: PermissionMatrix<ProjectPermission> = {
   owner: new Set([
     'project:read',
     'project:edit',
@@ -41,5 +42,5 @@ export const PROJECT_PERMISSIONS: Record<ProjectRole, Set<ProjectPermission>> = 
 
 /** Check whether a role has a given permission. */
 export function can(role: ProjectRole, permission: ProjectPermission): boolean {
-  return PROJECT_PERMISSIONS[role].has(permission);
+  return sharedCan(PROJECT_PERMISSIONS, role, permission);
 }
