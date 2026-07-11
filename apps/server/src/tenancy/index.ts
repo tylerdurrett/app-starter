@@ -13,3 +13,5 @@ export type { InviteLifecycleConfig, InviteTokenMeta, ResolveEntity } from './in
 export { slugify, ensureUniqueSlug } from './slug.js';
 export { can } from './permissions.js';
 export type { PermissionMatrix } from './permissions.js';
+export { resolveEntityAndRole } from './resolve.js';
+export type { ResolvedRole } from './resolve.js';
