@@ -7,19 +7,43 @@ import {
   workspaceMemberships,
 } from '@repo/db';
 import { eq, and } from 'drizzle-orm';
-import { randomUUID } from 'node:crypto';
-import { slugify, ensureUniqueSlug } from './slug.js';
+import { ensureUniqueSlug } from './slug.js';
 import { type ProjectRole, type ProjectPermission } from './permissions.js';
 import { resolveProjectWithOverride } from './resolver.js';
+import {
+  ServiceError,
+  createWithOwnerMembership,
+  listMembers as sharedListMembers,
+  removeMember as sharedRemoveMember,
+  type MemberCrudConfig,
+  type ResolveMemberEntity,
+} from '../tenancy/index.js';
 
-export class ServiceError extends Error {
-  constructor(
-    public readonly code: 'NOT_FOUND' | 'FORBIDDEN' | 'CONFLICT' | 'BAD_REQUEST',
-    message: string,
-  ) {
-    super(message);
-    this.name = 'ServiceError';
-  }
+export { ServiceError };
+
+/** Shared member-CRUD config for the project level (no owner guard). */
+const memberConfig: MemberCrudConfig<ProjectPermission> = {
+  permissions: { list: 'project:members:list', remove: 'project:members:remove' },
+  memberships: {
+    table: projectMemberships,
+    userId: projectMemberships.userId,
+    role: projectMemberships.role,
+    createdAt: projectMemberships.createdAt,
+    entityId: projectMemberships.projectId,
+  },
+  selfRemovalError: { code: 'CONFLICT', message: 'You cannot remove yourself from the project' },
+};
+
+function resolveProjectMember(
+  slug: string,
+  actorUserId: string,
+  workspaceSlug: string,
+): ResolveMemberEntity<ProjectPermission> {
+  return (permission) =>
+    resolveProjectAndRole(slug, actorUserId, permission, workspaceSlug).then((r) => ({
+      id: r.project.id,
+      role: r.role,
+    }));
 }
 
 /**
@@ -59,26 +83,15 @@ export async function createProject({
   let lastError: unknown;
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    let baseSlug = slugify(name);
-    // Fallback for names that produce an empty slug (e.g. all special chars)
-    if (!baseSlug) baseSlug = `project-${randomUUID().slice(0, 8)}`;
-
-    const slug = await ensureUniqueSlug(baseSlug, workspaceId);
-    const id = randomUUID();
-
     try {
-      const [created] = await db.transaction(async (tx) => {
-        const rows = await tx.insert(projects).values({ id, name, slug, workspaceId }).returning();
-        await tx.insert(projectMemberships).values({
-          id: randomUUID(),
-          projectId: id,
-          userId: ownerUserId,
-          role: 'owner',
-        });
-        return rows;
+      return await createWithOwnerMembership<typeof projects.$inferSelect>({
+        name,
+        ownerUserId,
+        slugFallbackPrefix: 'project',
+        ensureUniqueSlug: (baseSlug) => ensureUniqueSlug(baseSlug, workspaceId),
+        entity: { table: projects, extraFields: { workspaceId } },
+        memberships: { table: projectMemberships, entityIdKey: 'projectId' },
       });
-
-      return created;
     } catch (err) {
       if (isSlugUniqueViolation(err)) {
         lastError = err;
@@ -289,24 +302,7 @@ export async function deleteProject(
 }
 
 export async function listMembers(slug: string, actorUserId: string, workspaceSlug: string) {
-  const { project } = await resolveProjectAndRole(
-    slug,
-    actorUserId,
-    'project:members:list',
-    workspaceSlug,
-  );
-
-  return db
-    .select({
-      userId: projectMemberships.userId,
-      role: projectMemberships.role,
-      createdAt: projectMemberships.createdAt,
-      name: users.name,
-      email: users.email,
-    })
-    .from(projectMemberships)
-    .innerJoin(users, eq(projectMemberships.userId, users.id))
-    .where(eq(projectMemberships.projectId, project.id));
+  return sharedListMembers(memberConfig, resolveProjectMember(slug, actorUserId, workspaceSlug));
 }
 
 export async function removeMember(
@@ -315,40 +311,12 @@ export async function removeMember(
   targetUserId: string,
   workspaceSlug: string,
 ) {
-  const { project } = await resolveProjectAndRole(
-    slug,
+  return sharedRemoveMember(
+    memberConfig,
+    resolveProjectMember(slug, actorUserId, workspaceSlug),
     actorUserId,
-    'project:members:remove',
-    workspaceSlug,
+    targetUserId,
   );
-
-  if (targetUserId === actorUserId) {
-    throw new ServiceError('CONFLICT', 'You cannot remove yourself from the project');
-  }
-
-  // Check the target's current role
-  const [target] = await db
-    .select({ role: projectMemberships.role })
-    .from(projectMemberships)
-    .where(
-      and(
-        eq(projectMemberships.projectId, project.id),
-        eq(projectMemberships.userId, targetUserId),
-      ),
-    );
-
-  if (!target) {
-    throw new ServiceError('NOT_FOUND', 'Member not found');
-  }
-
-  await db
-    .delete(projectMemberships)
-    .where(
-      and(
-        eq(projectMemberships.projectId, project.id),
-        eq(projectMemberships.userId, targetUserId),
-      ),
-    );
 }
 
 export async function setLastActiveProject(userId: string, projectId: string) {

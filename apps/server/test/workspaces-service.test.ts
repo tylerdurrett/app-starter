@@ -285,6 +285,21 @@ describe('removeMember', () => {
       code: 'NOT_FOUND',
     });
   });
+
+  it('manager cannot remove the workspace owner (BAD_REQUEST)', async () => {
+    const ws = await createAndTrack('Manager Vs Owner', aliceId);
+    // Bob is a manager (has members:remove) but must not remove the owner.
+    await db.insert(workspaceMemberships).values({
+      id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      workspaceId: ws.id,
+      userId: bobId,
+      role: 'manager',
+    });
+
+    await expect(removeMember(ws.slug, bobId, aliceId)).rejects.toMatchObject({
+      code: 'BAD_REQUEST',
+    });
+  });
 });
 
 describe('invites', () => {
