@@ -126,8 +126,14 @@ export function SlackSettingsComponent({ mode, workspaceSlug, integration }: Set
       if (!integration) throw new Error('Missing integration');
       return deleteIntegration(workspaceSlug, integration.id);
     },
-    onSuccess: async () => {
-      await invalidateIntegration();
+    onSuccess: () => {
+      // Deliberately invalidate ONLY the list key here — NOT the deleted
+      // integration's detail key. The resource is gone, so refetching its
+      // detail key would 404 and (under the app's default retry: 3) retry
+      // several times, hanging the delete→navigate transition and flashing a
+      // "Failed to load integration" error before we leave the page. Fire the
+      // list invalidation without awaiting so navigation happens immediately.
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations(workspaceSlug) });
       navigate({
         to: '/w/$workspaceSlug/integrations',
         params: { workspaceSlug },
