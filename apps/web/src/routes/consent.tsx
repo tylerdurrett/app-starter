@@ -63,6 +63,10 @@ function ConsentPage() {
   const error = consentMutation.error?.message ?? '';
 
   const handleConsent = (accept: boolean) => {
+    // Clear any error from a prior failed attempt so the derived `error` string
+    // blanks out synchronously on retry; TanStack Query otherwise keeps
+    // mutation.error populated until the new attempt resolves.
+    consentMutation.reset();
     consentMutation.mutate(accept);
   };
 
