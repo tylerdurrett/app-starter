@@ -1,23 +1,24 @@
-import { apiFetch } from './api';
+import { apiFetch, apiFetchParsed } from './api';
+import {
+  maskedIntegrationSchema,
+  testIntegrationResultSchema,
+  type IntegrationStatus,
+  type IntegrationType,
+  type MaskedIntegration,
+  type TestIntegrationResult,
+} from '@repo/shared';
 
-export type IntegrationStatus = 'pending' | 'active' | 'error';
-export type IntegrationType = 'slack';
+// Response types are inferred from the shared API-contract schemas
+// (@repo/shared) — the single source of truth for these shapes.
+export type {
+  IntegrationStatus,
+  IntegrationType,
+  MaskedIntegration,
+  TestIntegrationResult,
+};
 
-export interface MaskedIntegration {
-  id: string;
-  workspaceId: string;
-  type: IntegrationType;
-  name: string;
-  status: IntegrationStatus;
-  config: Record<string, unknown>;
-  credentialsReadable: boolean;
-  lastTestedAt: string | null;
-  lastTestError: string | null;
-  createdByUserId: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
+// Request-input types are hand-declared here — request-input validation is out
+// of scope for the shared contract.
 export interface CreateIntegrationInput {
   type: IntegrationType;
   name: string;
@@ -29,29 +30,28 @@ export interface UpdateIntegrationInput {
   config?: Record<string, unknown>;
 }
 
-export interface TestIntegrationResult {
-  status: IntegrationStatus;
-  lastTestedAt: string;
-  info?: Record<string, string>;
-  error?: string;
-}
-
 export async function listIntegrations(workspaceSlug: string): Promise<MaskedIntegration[]> {
-  return apiFetch<MaskedIntegration[]>(`/api/workspaces/${workspaceSlug}/integrations`);
+  return apiFetchParsed(
+    `/api/workspaces/${workspaceSlug}/integrations`,
+    maskedIntegrationSchema.array(),
+  );
 }
 
 export async function getIntegration(
   workspaceSlug: string,
   integrationId: string,
 ): Promise<MaskedIntegration> {
-  return apiFetch<MaskedIntegration>(`/api/workspaces/${workspaceSlug}/integrations/${integrationId}`);
+  return apiFetchParsed(
+    `/api/workspaces/${workspaceSlug}/integrations/${integrationId}`,
+    maskedIntegrationSchema,
+  );
 }
 
 export async function createIntegration(
   workspaceSlug: string,
   data: CreateIntegrationInput,
 ): Promise<MaskedIntegration> {
-  return apiFetch<MaskedIntegration>(`/api/workspaces/${workspaceSlug}/integrations`, {
+  return apiFetchParsed(`/api/workspaces/${workspaceSlug}/integrations`, maskedIntegrationSchema, {
     method: 'POST',
     body: JSON.stringify(data),
   });
@@ -62,10 +62,14 @@ export async function updateIntegration(
   integrationId: string,
   data: UpdateIntegrationInput,
 ): Promise<MaskedIntegration> {
-  return apiFetch<MaskedIntegration>(`/api/workspaces/${workspaceSlug}/integrations/${integrationId}`, {
-    method: 'PATCH',
-    body: JSON.stringify(data),
-  });
+  return apiFetchParsed(
+    `/api/workspaces/${workspaceSlug}/integrations/${integrationId}`,
+    maskedIntegrationSchema,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    },
+  );
 }
 
 export async function deleteIntegration(
@@ -81,7 +85,11 @@ export async function testIntegration(
   workspaceSlug: string,
   integrationId: string,
 ): Promise<TestIntegrationResult> {
-  return apiFetch<TestIntegrationResult>(`/api/workspaces/${workspaceSlug}/integrations/${integrationId}/test`, {
-    method: 'POST',
-  });
+  return apiFetchParsed(
+    `/api/workspaces/${workspaceSlug}/integrations/${integrationId}/test`,
+    testIntegrationResultSchema,
+    {
+      method: 'POST',
+    },
+  );
 }
