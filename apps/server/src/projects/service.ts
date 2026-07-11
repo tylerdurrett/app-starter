@@ -11,16 +11,9 @@ import { randomUUID } from 'node:crypto';
 import { slugify, ensureUniqueSlug } from './slug.js';
 import { type ProjectRole, type ProjectPermission } from './permissions.js';
 import { resolveProjectWithOverride } from './resolver.js';
+import { ServiceError } from '../tenancy/index.js';
 
-export class ServiceError extends Error {
-  constructor(
-    public readonly code: 'NOT_FOUND' | 'FORBIDDEN' | 'CONFLICT' | 'BAD_REQUEST',
-    message: string,
-  ) {
-    super(message);
-    this.name = 'ServiceError';
-  }
-}
+export { ServiceError };
 
 /**
  * Lookup project by slug, verify actor membership, and optionally check permission.

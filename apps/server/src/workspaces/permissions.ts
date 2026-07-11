@@ -1,4 +1,6 @@
-export type WorkspaceRole = 'owner' | 'manager' | 'member';
+import type { TenancyRole } from '../tenancy/index.js';
+
+export type WorkspaceRole = TenancyRole;
 
 export type WorkspacePermission =
   | 'workspace:read'
