@@ -80,6 +80,38 @@ function projectRoleFromWorkspaceRole(workspaceRole: string): ProjectRole {
   return workspaceRole === 'owner' || workspaceRole === 'manager' ? 'owner' : 'member';
 }
 
+async function findDirectProjectRole(
+  projectId: string,
+  actorUserId: string,
+): Promise<ProjectRole | undefined> {
+  const [membership] = await db
+    .select({ role: projectMemberships.role })
+    .from(projectMemberships)
+    .where(
+      and(
+        eq(projectMemberships.projectId, projectId),
+        eq(projectMemberships.userId, actorUserId),
+      ),
+    );
+  return membership?.role as ProjectRole | undefined;
+}
+
+async function findWorkspaceProjectRole(
+  workspaceId: string,
+  actorUserId: string,
+): Promise<ProjectRole | undefined> {
+  const [membership] = await db
+    .select({ role: workspaceMemberships.role })
+    .from(workspaceMemberships)
+    .where(
+      and(
+        eq(workspaceMemberships.workspaceId, workspaceId),
+        eq(workspaceMemberships.userId, actorUserId),
+      ),
+    );
+  return membership ? projectRoleFromWorkspaceRole(membership.role) : undefined;
+}
+
 async function resolveProjectAccess(
   workspaceSlug: string,
   projectSlug: string,
@@ -102,31 +134,13 @@ async function resolveProjectAccess(
     roleResolvers: [
       // Direct project membership takes precedence over any workspace override.
       async (project) => {
-        const [projectMember] = await db
-          .select({ role: projectMemberships.role })
-          .from(projectMemberships)
-          .where(
-            and(
-              eq(projectMemberships.projectId, project.id),
-              eq(projectMemberships.userId, actorUserId),
-            ),
-          );
-        return projectMember ? { role: projectMember.role as ProjectRole } : undefined;
+        const role = await findDirectProjectRole(project.id, actorUserId);
+        return role ? { role } : undefined;
       },
       // Workspace access inherited by the project — creates no membership record.
       async (project) => {
-        const [workspaceMember] = await db
-          .select({ role: workspaceMemberships.role })
-          .from(workspaceMemberships)
-          .where(
-            and(
-              eq(workspaceMemberships.workspaceId, project.workspaceId),
-              eq(workspaceMemberships.userId, actorUserId),
-            ),
-          );
-        if (!workspaceMember) return undefined;
-
-        return { role: projectRoleFromWorkspaceRole(workspaceMember.role), viaOverride: true };
+        const role = await findWorkspaceProjectRole(project.workspaceId, actorUserId);
+        return role ? { role, viaOverride: true } : undefined;
       },
     ],
     can,
@@ -147,6 +161,24 @@ export async function getAuthorizedProjectBySlug(
     undefined,
   );
   return { ...entity, role };
+}
+
+export async function findAuthorizedProjectById(
+  projectId: string,
+  actorUserId: string,
+): Promise<AuthorizedProject | null> {
+  const [project] = await db
+    .select(authorizedProjectColumns)
+    .from(projects)
+    .innerJoin(workspaces, eq(projects.workspaceId, workspaces.id))
+    .where(eq(projects.id, projectId));
+  if (!project) return null;
+
+  const directRole = await findDirectProjectRole(project.id, actorUserId);
+  if (directRole) return { ...project, role: directRole };
+
+  const workspaceRole = await findWorkspaceProjectRole(project.workspaceId, actorUserId);
+  return workspaceRole ? { ...project, role: workspaceRole } : null;
 }
 
 export async function listAuthorizedProjectsForUser(

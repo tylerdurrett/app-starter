@@ -4,12 +4,13 @@ import '../src/config.js';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildServer } from '../src/index.js';
 import { db, workspaces, workspaceMemberships, projects, projectMemberships } from '@repo/db';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 
 import { createWorkspace } from '../src/workspaces/service.js';
 import { createProject } from '../src/projects/service.js';
 import {
+  findAuthorizedProjectById,
   getAuthorizedProjectBySlug,
   listAuthorizedProjectsForUser,
   resolveProjectWithOverride,
@@ -265,6 +266,125 @@ describe('getAuthorizedProjectBySlug', () => {
     await expect(
       getAuthorizedProjectBySlug(ws.slug, proj.slug, outsiderId),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+});
+
+describe('findAuthorizedProjectById', () => {
+  it('returns the exact canonical projection for a direct owner', async () => {
+    const actorId = await signUpWithoutPersonalWorkspace('find-direct-owner');
+    const ws = await createWs('Canonical Find Direct Owner Ws', wsOwnerId);
+    const proj = await createProj('Canonical Find Direct Owner Proj', ws.id, actorId);
+
+    const result = await findAuthorizedProjectById(proj.id, actorId);
+
+    expect(result).toEqual({
+      id: proj.id,
+      name: proj.name,
+      slug: proj.slug,
+      workspaceId: ws.id,
+      workspaceSlug: ws.slug,
+      workspaceName: ws.name,
+      createdAt: proj.createdAt,
+      updatedAt: proj.updatedAt,
+      role: 'owner',
+    });
+    expect(Object.keys(result!).sort()).toEqual(authorizedProjectKeys);
+  });
+
+  it.each(['manager', 'member'] as const)('returns a direct %s role', async (role) => {
+    const actorId = await signUpWithoutPersonalWorkspace(`find-direct-${role}`);
+    const ws = await createWs(`Canonical Find Direct ${role} Ws`, wsOwnerId);
+    const proj = await createProj(`Canonical Find Direct ${role} Proj`, ws.id, ownerId);
+    await addProjectMember(proj.id, actorId, role);
+
+    const result = await findAuthorizedProjectById(proj.id, actorId);
+
+    expect(result).toMatchObject({ id: proj.id, role });
+  });
+
+  it.each([
+    ['owner', 'owner'],
+    ['manager', 'owner'],
+    ['member', 'member'],
+  ] as const)(
+    'maps workspace %s access to project %s',
+    async (workspaceRole, expectedProjectRole) => {
+      const actorId = await signUpWithoutPersonalWorkspace(`find-workspace-${workspaceRole}`);
+      const ws = await createWs(
+        `Canonical Find Workspace ${workspaceRole} Ws`,
+        workspaceRole === 'owner' ? actorId : wsOwnerId,
+      );
+      if (workspaceRole !== 'owner') {
+        await addWorkspaceMember(ws.id, actorId, workspaceRole);
+      }
+      const proj = await createProj(
+        `Canonical Find Workspace ${workspaceRole} Proj`,
+        ws.id,
+        ownerId,
+      );
+
+      const result = await findAuthorizedProjectById(proj.id, actorId);
+
+      expect(result).toMatchObject({
+        id: proj.id,
+        workspaceId: ws.id,
+        workspaceSlug: ws.slug,
+        workspaceName: ws.name,
+        role: expectedProjectRole,
+      });
+      expect(Object.keys(result!).sort()).toEqual(authorizedProjectKeys);
+    },
+  );
+
+  it('prefers a weaker direct role over workspace-owner access', async () => {
+    const actorId = await signUpWithoutPersonalWorkspace('find-precedence');
+    const ws = await createWs('Canonical Find Precedence Ws', actorId);
+    const proj = await createProj('Canonical Find Precedence Proj', ws.id, ownerId);
+    await addProjectMember(proj.id, actorId, 'member');
+
+    await expect(findAuthorizedProjectById(proj.id, actorId)).resolves.toMatchObject({
+      id: proj.id,
+      role: 'member',
+    });
+  });
+
+  it('falls back to workspace access after direct access is removed, then returns null', async () => {
+    const actorId = await signUpWithoutPersonalWorkspace('find-access-loss');
+    const ws = await createWs('Canonical Find Access Loss Ws', wsOwnerId);
+    const proj = await createProj('Canonical Find Access Loss Proj', ws.id, ownerId);
+    await addWorkspaceMember(ws.id, actorId, 'manager');
+    await addProjectMember(proj.id, actorId, 'member');
+
+    await db
+      .delete(projectMemberships)
+      .where(
+        and(
+          eq(projectMemberships.projectId, proj.id),
+          eq(projectMemberships.userId, actorId),
+        ),
+      );
+    await expect(findAuthorizedProjectById(proj.id, actorId)).resolves.toMatchObject({
+      role: 'owner',
+    });
+
+    await db
+      .delete(workspaceMemberships)
+      .where(
+        and(
+          eq(workspaceMemberships.workspaceId, ws.id),
+          eq(workspaceMemberships.userId, actorId),
+        ),
+      );
+    await expect(findAuthorizedProjectById(proj.id, actorId)).resolves.toBeNull();
+  });
+
+  it('returns null without throwing for missing and inaccessible projects', async () => {
+    const actorId = await signUpWithoutPersonalWorkspace('find-null');
+    const ws = await createWs('Canonical Find Inaccessible Ws', wsOwnerId);
+    const proj = await createProj('Canonical Find Inaccessible Proj', ws.id, ownerId);
+
+    await expect(findAuthorizedProjectById('missing-project-id', actorId)).resolves.toBeNull();
+    await expect(findAuthorizedProjectById(proj.id, actorId)).resolves.toBeNull();
   });
 });
 

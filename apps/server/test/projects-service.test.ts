@@ -12,7 +12,7 @@ import {
   projectInvites,
   users,
 } from '@repo/db';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 
 import { createWorkspace } from '../src/workspaces/service.js';
@@ -570,6 +570,15 @@ describe('workspace-scoped slug threading through service wrappers', () => {
 });
 
 describe('last active project', () => {
+  it('returns null when the user has no last-active project', async () => {
+    await db
+      .update(users)
+      .set({ lastActiveProjectId: null })
+      .where(eq(users.id, bobId));
+
+    await expect(getLastActiveProject(bobId)).resolves.toBeNull();
+  });
+
   it('setLastActiveProject updates the user row', async () => {
     const proj = await createAndTrack('Last Active Set', aliceId);
     await setLastActiveProject(aliceId, proj.id);
@@ -587,8 +596,71 @@ describe('last active project', () => {
     await setLastActiveProject(aliceId, proj.id);
 
     const result = await getLastActiveProject(aliceId);
-    expect(result).not.toBeNull();
-    expect(result!.id).toBe(proj.id);
+    expect(result).toEqual({
+      id: proj.id,
+      name: proj.name,
+      slug: proj.slug,
+      workspaceId,
+      workspaceSlug,
+      workspaceName: 'Projects Test Parent',
+      createdAt: proj.createdAt,
+      updatedAt: proj.updatedAt,
+      role: 'owner',
+    });
+  });
+
+  it('returns null without throwing when the stored project is inaccessible', async () => {
+    const workspace = await createAndTrackWorkspace('Last Active Inaccessible Workspace', aliceId);
+    const proj = await createAndTrack('Last Active Inaccessible Project', aliceId, {
+      wsId: workspace.id,
+    });
+    await setLastActiveProject(bobId, proj.id);
+
+    await expect(getLastActiveProject(bobId)).resolves.toBeNull();
+  });
+
+  it('uses workspace-derived access for the stored project', async () => {
+    const workspace = await createAndTrackWorkspace('Last Active Workspace Access', aliceId);
+    const proj = await createAndTrack('Last Active Workspace Project', aliceId, {
+      wsId: workspace.id,
+    });
+    await addWorkspaceMember(workspace.id, bobId, 'manager');
+    await setLastActiveProject(bobId, proj.id);
+
+    await expect(getLastActiveProject(bobId)).resolves.toMatchObject({
+      id: proj.id,
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'owner',
+    });
+  });
+
+  it('falls back to workspace access after direct access loss, then returns null', async () => {
+    const workspace = await createAndTrackWorkspace('Last Active Access Loss Workspace', aliceId);
+    const proj = await createAndTrack('Last Active Access Loss Project', aliceId, {
+      wsId: workspace.id,
+    });
+    await addWorkspaceMember(workspace.id, bobId, 'member');
+    await addProjectMember(proj.id, bobId, 'manager');
+    await setLastActiveProject(bobId, proj.id);
+
+    await db
+      .delete(projectMemberships)
+      .where(
+        and(eq(projectMemberships.projectId, proj.id), eq(projectMemberships.userId, bobId)),
+      );
+    await expect(getLastActiveProject(bobId)).resolves.toMatchObject({
+      id: proj.id,
+      role: 'member',
+    });
+
+    await db
+      .delete(workspaceMemberships)
+      .where(
+        and(eq(workspaceMemberships.workspaceId, workspace.id), eq(workspaceMemberships.userId, bobId)),
+      );
+    await expect(getLastActiveProject(bobId)).resolves.toBeNull();
   });
 
   it('returns null after the referenced project is deleted (FK SET NULL)', async () => {

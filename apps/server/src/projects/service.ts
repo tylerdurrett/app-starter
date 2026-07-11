@@ -9,7 +9,7 @@ import {
 import { eq, and } from 'drizzle-orm';
 import { ensureUniqueSlug } from './slug.js';
 import { type ProjectRole, type ProjectPermission } from './permissions.js';
-import { resolveProjectWithOverride } from './resolver.js';
+import { findAuthorizedProjectById, resolveProjectWithOverride } from './resolver.js';
 import {
   ServiceError,
   createWithOwnerMembership,
@@ -330,27 +330,5 @@ export async function getLastActiveProject(userId: string) {
     .where(eq(users.id, userId));
 
   if (!user?.lastActiveProjectId) return null;
-
-  // Check if the user still has access to that project
-  const [membership] = await db
-    .select({
-      id: projects.id,
-      name: projects.name,
-      slug: projects.slug,
-      workspaceId: projects.workspaceId,
-      workspaceSlug: workspaces.slug,
-      workspaceName: workspaces.name,
-      createdAt: projects.createdAt,
-      updatedAt: projects.updatedAt,
-      role: projectMemberships.role,
-    })
-    .from(projects)
-    .innerJoin(
-      projectMemberships,
-      and(eq(projectMemberships.projectId, projects.id), eq(projectMemberships.userId, userId)),
-    )
-    .innerJoin(workspaces, eq(workspaces.id, projects.workspaceId))
-    .where(eq(projects.id, user.lastActiveProjectId));
-
-  return membership || null;
+  return findAuthorizedProjectById(user.lastActiveProjectId, userId);
 }
