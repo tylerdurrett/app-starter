@@ -401,8 +401,21 @@ describe('POST /api/workspaces/:workspaceSlug/invites', () => {
     expect(res.statusCode).toBe(201);
     const body = JSON.parse(res.body);
     expect(body.inviteUrl).toMatch(/\/invite\/workspace\//);
+    // Full mapped WorkspaceInvite shape (routed through the shared mapper).
+    expect(typeof body.invite.id).toBe('string');
     expect(body.invite.email).toBe('newuser@example.com');
     expect(body.invite.role).toBe('manager');
+    expect(body.invite.status).toBe('pending');
+    expect(typeof body.invite.expiresAt).toBe('string');
+    expect(typeof body.invite.createdAt).toBe('string');
+    expect(body.invite.invitedByName).toBe('Alice');
+    // Internal columns must not leak to the client.
+    expect(body.invite.tokenHash).toBeUndefined();
+    expect(body.invite.workspaceId).toBeUndefined();
+    expect(body.invite.invitedByUserId).toBeUndefined();
+    expect(Object.keys(body.invite).sort()).toEqual(
+      ['createdAt', 'email', 'expiresAt', 'id', 'invitedByName', 'role', 'status'].sort(),
+    );
   });
 
   it('manager can create invite', async () => {
