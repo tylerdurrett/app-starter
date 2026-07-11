@@ -186,6 +186,8 @@ describe('listProjectsForUser', () => {
       name: project.name,
       slug: project.slug,
       workspaceId: workspace.id,
+      workspaceName: workspace.name,
+      workspaceSlug: workspace.slug,
       createdAt: project.createdAt,
       updatedAt: project.updatedAt,
       role: 'member',

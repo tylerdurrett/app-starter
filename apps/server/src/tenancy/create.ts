@@ -47,6 +47,11 @@ export async function createWithOwnerMembership<Entity>(
   const id = randomUUID();
 
   const [created] = await db.transaction(async (tx) => {
+    // The level-agnostic config types its tables as bare `PgTable`, which carries
+    // no row model, so insert values must be cast to `$inferInsert` here and below.
+    // Accepted deliberately (see #66): the alternative — making the config generic
+    // over each table's type — costs more readability than the marginal compile-time
+    // safety is worth, and these insert paths are covered by real-DB integration tests.
     const entityValues = {
       id,
       name: config.name,
