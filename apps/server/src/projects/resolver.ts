@@ -30,15 +30,55 @@ export async function resolveProjectWithOverride(
   role: ProjectRole;
   viaWorkspaceOverride?: boolean;
 }> {
-  const { entity, role, viaOverride } = await resolveEntityAndRole<
-    typeof projects.$inferSelect,
-    ProjectRole,
-    ProjectPermission
-  >({
-    // Resolve the project by (workspace, slug) via a non-authorizing join.
+  const { entity, role, viaOverride } = await resolveProjectAccess(
+    workspaceSlug,
+    projectSlug,
+    actorUserId,
+    requiredPermission,
+  );
+
+  const project: typeof projects.$inferSelect = {
+    id: entity.id,
+    name: entity.name,
+    slug: entity.slug,
+    workspaceId: entity.workspaceId,
+    createdAt: entity.createdAt,
+    updatedAt: entity.updatedAt,
+  };
+
+  return viaOverride
+    ? { project, role, viaWorkspaceOverride: true }
+    : { project, role };
+}
+
+export interface AuthorizedProject {
+  id: string;
+  name: string;
+  slug: string;
+  workspaceId: string;
+  workspaceSlug: string;
+  workspaceName: string;
+  createdAt: Date;
+  updatedAt: Date;
+  role: ProjectRole;
+}
+
+type ProjectAccessEntity = Omit<AuthorizedProject, 'role'>;
+
+async function resolveProjectAccess(
+  workspaceSlug: string,
+  projectSlug: string,
+  actorUserId: string,
+  requiredPermission: ProjectPermission | undefined,
+) {
+  return resolveEntityAndRole<ProjectAccessEntity, ProjectRole, ProjectPermission>({
     lookup: async () => {
       const [project] = await db
-        .select(getTableColumns(projects))
+        .select({
+          ...getTableColumns(projects),
+          workspaceSlug: workspaces.slug,
+          workspaceName: workspaces.name,
+        })
         .from(projects)
         .innerJoin(workspaces, eq(projects.workspaceId, workspaces.id))
         .where(and(eq(workspaces.slug, workspaceSlug), eq(projects.slug, projectSlug)));
@@ -81,8 +121,18 @@ export async function resolveProjectWithOverride(
     requiredPermission,
     notFoundMessage: 'Project not found',
   });
+}
 
-  return viaOverride
-    ? { project: entity, role, viaWorkspaceOverride: true }
-    : { project: entity, role };
+export async function getAuthorizedProjectBySlug(
+  workspaceSlug: string,
+  projectSlug: string,
+  actorUserId: string,
+): Promise<AuthorizedProject> {
+  const { entity, role } = await resolveProjectAccess(
+    workspaceSlug,
+    projectSlug,
+    actorUserId,
+    undefined,
+  );
+  return { ...entity, role };
 }

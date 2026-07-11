@@ -9,7 +9,10 @@ import type { FastifyInstance } from 'fastify';
 
 import { createWorkspace } from '../src/workspaces/service.js';
 import { createProject } from '../src/projects/service.js';
-import { resolveProjectWithOverride } from '../src/projects/resolver.js';
+import {
+  getAuthorizedProjectBySlug,
+  resolveProjectWithOverride,
+} from '../src/projects/resolver.js';
 
 // ---- helpers ----
 
@@ -102,6 +105,138 @@ afterAll(async () => {
 });
 
 // ---- tests ----
+
+describe('getAuthorizedProjectBySlug', () => {
+  it('returns the canonical project projection for a direct project owner', async () => {
+    const ws = await createWs('Canonical Direct Owner Ws', wsOwnerId);
+    const proj = await createProj('Canonical Direct Owner Proj', ws.id, ownerId);
+
+    const result = await getAuthorizedProjectBySlug(ws.slug, proj.slug, ownerId);
+
+    expect(result).toEqual({
+      id: proj.id,
+      name: proj.name,
+      slug: proj.slug,
+      workspaceId: ws.id,
+      workspaceSlug: ws.slug,
+      workspaceName: ws.name,
+      createdAt: proj.createdAt,
+      updatedAt: proj.updatedAt,
+      role: 'owner',
+    });
+    expect(Object.keys(result).sort()).toEqual(
+      [
+        'id',
+        'name',
+        'slug',
+        'workspaceId',
+        'workspaceSlug',
+        'workspaceName',
+        'createdAt',
+        'updatedAt',
+        'role',
+      ].sort(),
+    );
+  });
+
+  it.each(['manager', 'member'] as const)(
+    'returns a direct project %s role',
+    async (role) => {
+      const ws = await createWs(`Canonical Direct ${role} Ws`, wsOwnerId);
+      const proj = await createProj(`Canonical Direct ${role} Proj`, ws.id, ownerId);
+      await addProjectMember(proj.id, outsiderId, role);
+
+      const result = await getAuthorizedProjectBySlug(ws.slug, proj.slug, outsiderId);
+
+      expect(result.role).toBe(role);
+      expect(result.id).toBe(proj.id);
+    },
+  );
+
+  it.each([
+    ['owner', 'owner'],
+    ['manager', 'owner'],
+    ['member', 'member'],
+  ] as const)(
+    'maps workspace %s access to project %s',
+    async (workspaceRole, expectedProjectRole) => {
+      const ws = await createWs(`Canonical Override ${workspaceRole} Ws`, wsOwnerId);
+      const proj = await createProj(`Canonical Override ${workspaceRole} Proj`, ws.id, ownerId);
+      const actorUserId = workspaceRole === 'owner' ? wsOwnerId : outsiderId;
+      if (workspaceRole !== 'owner') {
+        await addWorkspaceMember(ws.id, actorUserId, workspaceRole);
+      }
+
+      const result = await getAuthorizedProjectBySlug(ws.slug, proj.slug, actorUserId);
+
+      expect(result.role).toBe(expectedProjectRole);
+      expect(result.id).toBe(proj.id);
+    },
+  );
+
+  it('prefers a weaker direct role over a stronger workspace override', async () => {
+    const ws = await createWs('Canonical Precedence Ws', wsOwnerId);
+    const proj = await createProj('Canonical Precedence Proj', ws.id, ownerId);
+    await addProjectMember(proj.id, wsOwnerId, 'member');
+
+    const result = await getAuthorizedProjectBySlug(ws.slug, proj.slug, wsOwnerId);
+
+    expect(result.role).toBe('member');
+  });
+
+  it('authorizes direct project access without workspace membership', async () => {
+    const ws = await createWs('Canonical Direct Only Ws', wsOwnerId);
+    const proj = await createProj('Canonical Direct Only Proj', ws.id, ownerId);
+
+    const result = await getAuthorizedProjectBySlug(ws.slug, proj.slug, ownerId);
+
+    expect(result).toMatchObject({ id: proj.id, workspaceId: ws.id, role: 'owner' });
+  });
+
+  it('resolves duplicate project slugs by workspace', async () => {
+    const wsA = await createWs('Canonical Duplicate Ws A', wsOwnerId);
+    const wsB = await createWs('Canonical Duplicate Ws B', wsOwnerId);
+    const projA = await createProj('Canonical Shared Proj', wsA.id, ownerId);
+    const projB = await createProj('Canonical Shared Proj', wsB.id, ownerId);
+    expect(projA.slug).toBe(projB.slug);
+
+    const resultA = await getAuthorizedProjectBySlug(wsA.slug, projA.slug, ownerId);
+    const resultB = await getAuthorizedProjectBySlug(wsB.slug, projB.slug, ownerId);
+
+    expect(resultA.id).toBe(projA.id);
+    expect(resultB.id).toBe(projB.id);
+  });
+
+  it('returns NOT_FOUND when the project belongs to a different workspace', async () => {
+    const wsA = await createWs('Canonical Wrong Workspace A', wsOwnerId);
+    const wsB = await createWs('Canonical Wrong Workspace B', wsOwnerId);
+    const proj = await createProj('Canonical Wrong Workspace Proj', wsA.id, ownerId);
+
+    await expect(
+      getAuthorizedProjectBySlug(wsB.slug, proj.slug, ownerId),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('returns NOT_FOUND for a missing workspace or project', async () => {
+    const ws = await createWs('Canonical Missing Ws', wsOwnerId);
+
+    await expect(
+      getAuthorizedProjectBySlug(ws.slug, 'missing-project', ownerId),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(
+      getAuthorizedProjectBySlug('missing-workspace', 'missing-project', ownerId),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('returns NOT_FOUND when the actor has no project or workspace access', async () => {
+    const ws = await createWs('Canonical Inaccessible Ws', wsOwnerId);
+    const proj = await createProj('Canonical Inaccessible Proj', ws.id, ownerId);
+
+    await expect(
+      getAuthorizedProjectBySlug(ws.slug, proj.slug, outsiderId),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+});
 
 describe('resolveProjectWithOverride', () => {
   it('throws NOT_FOUND for a non-existent project slug', async () => {
