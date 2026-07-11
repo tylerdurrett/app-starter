@@ -8,8 +8,11 @@ import './app.css';
 
 // Create the query client first so it can be shared as router context: loaders
 // seed the same cache (via context.queryClient) that the components read from
-// through QueryClientProvider below (ADR-0007).
-const queryClient = new QueryClient();
+// through QueryClientProvider below (ADR-0007). The 30s staleTime keeps
+// loader-seeded reads fresh on mount so they don't background-revalidate.
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { staleTime: 30_000 } },
+});
 
 // Create a new router instance
 const router = createRouter({ routeTree, context: { queryClient } });
