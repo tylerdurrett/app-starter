@@ -19,9 +19,28 @@ developer or agent adds a fourth variant.
   via `useMutation` with cache invalidation. No component-level
   `useState`/`useEffect` fetching — that style is being removed in a
   cleanup pass and must not be reintroduced.
-- **Route loaders are for gating only**: redirect-or-render decisions
-  (does this slug resolve, is this invite valid), ideally seeding the
-  query cache rather than owning data.
+- **Route loaders gate AND seed**: they make the redirect-or-render
+  decision (does this slug resolve, is this invite valid) and, when the
+  fetched entity is server state a component renders, seed it into the
+  query cache under the shared key via `queryClient.setQueryData` (the
+  router carries the `QueryClient` in its context). Seeding — not owning —
+  means the component's `useQuery` hits a warm cache on first paint (no
+  second fetch, no full-page spinner on navigation-in) while a mutation's
+  invalidation still has a live observer to refresh.
+- **Every mutable display value is read via `useQuery`** on the exact key
+  its mutation invalidates. `useLoaderData()` is for gating-derived,
+  non-mutating values only (a resolved slug, a role, a registry entry) —
+  never for render state a mutation can change, because loader data is a
+  snapshot with no observer, so an on-screen value read from it goes stale
+  after a mutation until a manual reload.
+- **Shared 30s `staleTime` baseline**: the shared `QueryClient` sets an
+  app-wide `defaultOptions.queries.staleTime` of 30 seconds (rather than
+  the library default of 0). Because loaders seed the cache immediately
+  before the component mounts, a `staleTime` of 0 would mark that entry
+  stale on first render and fire a redundant background revalidation; a 30s
+  window keeps loader-seeded reads fresh, eliminating the refetch-on-mount.
+  Mutation `invalidateQueries` bypasses `staleTime`, so renames and other
+  writes still refetch and reflect live.
 
 Rejected alternative: loaders-first (all data resolved before render,
 fewer spinners) with Query only for interactive refetching. Query-first

@@ -1,9 +1,10 @@
 import { createFileRoute, Link, getRouteApi, useNavigate } from '@tanstack/react-router';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle } from '@repo/ui';
-import { listProjectsForWorkspace, listWorkspaceMembers, type WorkspaceMember } from '../lib/workspaces';
-import type { ProjectWithRole } from '../lib/projects';
+import { listProjectsForWorkspace, listWorkspaceMembers } from '../lib/workspaces';
 import { canWorkspace } from '../lib/permissions';
+import { queryKeys } from '../lib/query-keys';
 import { CreateProjectModal } from '../components/create-project-modal';
 import { Plus } from 'lucide-react';
 
@@ -17,32 +18,25 @@ function WorkspaceHomePage() {
   const { workspace } = workspaceRoute.useLoaderData();
   const { role } = workspace;
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
-  const [projects, setProjects] = useState<ProjectWithRole[]>([]);
-  const [members, setMembers] = useState<WorkspaceMember[]>([]);
-  const [loadingProjects, setLoadingProjects] = useState(true);
-  const [loadingMembers, setLoadingMembers] = useState(true);
-  const [projectsError, setProjectsError] = useState('');
-  const [membersError, setMembersError] = useState('');
   const [showCreateModal, setShowCreateModal] = useState(false);
 
-  useEffect(() => {
-    // Fetch projects
-    listProjectsForWorkspace(workspace.slug)
-      .then(setProjects)
-      .catch(() => setProjectsError('Failed to load projects'))
-      .finally(() => setLoadingProjects(false));
+  // Server state lives in TanStack Query (ADR-0007); the gating loader owns only
+  // the workspace detail, so the list reads happen here.
+  const projectsQuery = useQuery({
+    queryKey: queryKeys.projects(workspace.slug),
+    queryFn: () => listProjectsForWorkspace(workspace.slug),
+  });
+  const projects = projectsQuery.data ?? [];
 
-    // Fetch members
-    if (canWorkspace(role, 'workspace:members:list')) {
-      listWorkspaceMembers(workspace.slug)
-        .then(setMembers)
-        .catch(() => setMembersError('Failed to load members'))
-        .finally(() => setLoadingMembers(false));
-    } else {
-      setLoadingMembers(false);
-    }
-  }, [workspace.slug, role]);
+  const canListMembers = canWorkspace(role, 'workspace:members:list');
+  const membersQuery = useQuery({
+    queryKey: queryKeys.workspaceMembers(workspace.slug),
+    queryFn: () => listWorkspaceMembers(workspace.slug),
+    enabled: canListMembers,
+  });
+  const members = membersQuery.data ?? [];
 
   return (
     <div className="p-8">
@@ -66,16 +60,16 @@ function WorkspaceHomePage() {
               )}
             </CardHeader>
             <CardContent>
-              {loadingProjects && (
+              {projectsQuery.isPending && (
                 <p className="text-sm text-muted-foreground">Loading...</p>
               )}
-              {projectsError && (
-                <p className="text-sm text-destructive">{projectsError}</p>
+              {projectsQuery.error && (
+                <p className="text-sm text-destructive">Failed to load projects</p>
               )}
-              {!loadingProjects && !projectsError && projects.length === 0 && (
+              {!projectsQuery.isPending && !projectsQuery.error && projects.length === 0 && (
                 <p className="text-sm text-muted-foreground">No projects yet.</p>
               )}
-              {!loadingProjects && projects.length > 0 && (
+              {!projectsQuery.isPending && projects.length > 0 && (
                 <ul className="space-y-2">
                   {projects.map((project) => (
                     <li key={project.id}>
@@ -106,21 +100,21 @@ function WorkspaceHomePage() {
               <CardTitle>Members</CardTitle>
             </CardHeader>
             <CardContent>
-              {!canWorkspace(role, 'workspace:members:list') && (
+              {!canListMembers && (
                 <p className="text-sm text-muted-foreground">
                   You don't have permission to view members.
                 </p>
               )}
-              {loadingMembers && canWorkspace(role, 'workspace:members:list') && (
+              {canListMembers && membersQuery.isLoading && (
                 <p className="text-sm text-muted-foreground">Loading...</p>
               )}
-              {membersError && (
-                <p className="text-sm text-destructive">{membersError}</p>
+              {canListMembers && membersQuery.error && (
+                <p className="text-sm text-destructive">Failed to load members</p>
               )}
-              {!loadingMembers && !membersError && members.length === 0 && (
+              {canListMembers && !membersQuery.isLoading && !membersQuery.error && members.length === 0 && (
                 <p className="text-sm text-muted-foreground">No members yet.</p>
               )}
-              {!loadingMembers && members.length > 0 && (
+              {canListMembers && !membersQuery.isLoading && members.length > 0 && (
                 <>
                   <p className="text-sm text-muted-foreground mb-3">
                     {members.length} member{members.length !== 1 ? 's' : ''}
@@ -164,11 +158,9 @@ function WorkspaceHomePage() {
         open={showCreateModal}
         onOpenChange={setShowCreateModal}
         onCreated={(project) => {
-          setProjects((prev) =>
-            prev.some((p) => p.id === project.id)
-              ? prev
-              : [...prev, { ...project, role: 'owner' }],
-          );
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.projects(workspace.slug),
+          });
           navigate({
             to: '/w/$workspaceSlug/p/$projectSlug',
             params: { workspaceSlug: workspace.slug, projectSlug: project.slug },

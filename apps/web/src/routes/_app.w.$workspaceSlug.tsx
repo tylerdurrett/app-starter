@@ -1,12 +1,16 @@
 import { createFileRoute, Outlet, notFound } from '@tanstack/react-router';
 import { getWorkspace } from '../lib/workspaces';
+import { queryKeys } from '../lib/query-keys';
 import { ApiError } from '../lib/api';
 
 export const Route = createFileRoute('/_app/w/$workspaceSlug')({
-  loader: async ({ params }) => {
+  loader: async ({ params, context }) => {
     const { workspaceSlug } = params;
     try {
       const workspace = await getWorkspace(workspaceSlug);
+      // Gate passed — seed the query cache so the component's useQuery reads
+      // this same value (ADR-0007) and a rename's invalidation refreshes live.
+      context.queryClient.setQueryData(queryKeys.workspace(workspaceSlug), workspace);
       return { workspace };
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {

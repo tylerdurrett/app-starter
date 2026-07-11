@@ -1,8 +1,10 @@
 import { createFileRoute, getRouteApi, useNavigate } from '@tanstack/react-router';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle } from '@repo/ui';
 import { canWorkspace } from '../lib/permissions';
 import { listIntegrations, deleteIntegration, type MaskedIntegration } from '../lib/integrations';
+import { queryKeys } from '../lib/query-keys';
 import { Plus, ExternalLink, AlertCircle, CheckCircle, Clock, KeyRound, Trash2 } from 'lucide-react';
 import { IntegrationPickerDialog } from '../components/integration-picker-dialog';
 import { DeleteIntegrationDialog } from '../components/delete-integration-dialog';
@@ -15,31 +17,28 @@ export const Route = createFileRoute('/_app/w/$workspaceSlug/integrations/')({
 
 function IntegrationsListPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { workspace } = workspaceRoute.useLoaderData();
   const { role } = workspace;
-  const [integrations, setIntegrations] = useState<MaskedIntegration[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // Dialog/picker/delete-target selection is UI state and stays local.
   const [showPicker, setShowPicker] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<MaskedIntegration | null>(null);
-  const [isDeleting, setIsDeleting] = useState(false);
 
-  useEffect(() => {
-    loadIntegrations();
-  }, [workspace.slug]);
+  // The integration list is server state — read it through the shared query key.
+  const integrationsQuery = useQuery({
+    queryKey: queryKeys.integrations(workspace.slug),
+    queryFn: () => listIntegrations(workspace.slug),
+  });
+  const integrations = integrationsQuery.data ?? [];
 
-  async function loadIntegrations() {
-    try {
-      setError(null);
-      const data = await listIntegrations(workspace.slug);
-      setIntegrations(data);
-    } catch (err) {
-      setError('Failed to load integrations');
-      console.error('Failed to load integrations:', err);
-    } finally {
-      setLoading(false);
-    }
-  }
+  // Delete invalidates the list so it reflects the change without a manual reload.
+  const deleteMutation = useMutation({
+    mutationFn: (integrationId: string) => deleteIntegration(workspace.slug, integrationId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.integrations(workspace.slug) });
+      setDeleteTarget(null);
+    },
+  });
 
   function handleIntegrationTypeSelected(type: string) {
     setShowPicker(false);
@@ -56,22 +55,12 @@ function IntegrationsListPage() {
     });
   }
 
-  async function confirmDelete() {
+  function confirmDelete() {
     if (!deleteTarget) return;
-    setIsDeleting(true);
-    try {
-      await deleteIntegration(workspace.slug, deleteTarget.id);
-      setIntegrations((prev) => prev.filter((i) => i.id !== deleteTarget.id));
-      setDeleteTarget(null);
-    } catch (err) {
-      console.error('Failed to delete integration:', err);
-      setError('Failed to delete integration. Check the server logs.');
-    } finally {
-      setIsDeleting(false);
-    }
+    deleteMutation.mutate(deleteTarget.id);
   }
 
-  if (loading) {
+  if (integrationsQuery.isLoading) {
     return (
       <div className="p-8">
         <div className="max-w-5xl mx-auto">
@@ -83,13 +72,13 @@ function IntegrationsListPage() {
     );
   }
 
-  if (error) {
+  if (integrationsQuery.isError) {
     return (
       <div className="p-8">
         <div className="max-w-5xl mx-auto">
           <div className="text-center py-12">
             <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
-            <div className="text-red-600">{error}</div>
+            <div className="text-red-600">Failed to load integrations</div>
           </div>
         </div>
       </div>
@@ -209,11 +198,17 @@ function IntegrationsListPage() {
           />
         )}
 
+        {deleteMutation.isError && (
+          <div className="text-sm text-red-600">
+            Failed to delete integration. Check the server logs.
+          </div>
+        )}
+
         <DeleteIntegrationDialog
           open={deleteTarget !== null}
           onOpenChange={(open) => !open && setDeleteTarget(null)}
           integrationName={deleteTarget?.name ?? ''}
-          isDeleting={isDeleting}
+          isDeleting={deleteMutation.isPending}
           onConfirm={confirmDelete}
         />
       </div>

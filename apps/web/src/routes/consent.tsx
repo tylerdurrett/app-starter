@@ -1,8 +1,10 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { useState, useEffect, useMemo } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle } from '@repo/ui';
 import { ShieldCheck } from 'lucide-react';
-import { authClient, useSession } from '../lib/auth-client';
+import { useSession } from '../lib/auth-client';
+import { fetchOAuthClient, submitConsent } from '../lib/oauth-consent';
+import { queryKeys } from '../lib/query-keys';
 
 /** Human-readable descriptions for OAuth scopes */
 const SCOPE_LABELS: Record<string, string> = {
@@ -18,91 +20,54 @@ function humanizeScope(scope: string): string {
   return SCOPE_LABELS[scope] ?? scope;
 }
 
-interface ClientInfo {
-  client_id: string;
-  client_name?: string;
-  client_uri?: string;
-  logo_uri?: string;
-  tos_uri?: string;
-  policy_uri?: string;
-}
-
 export const Route = createFileRoute('/consent')({
   component: ConsentPage,
 });
 
+// Deriving clientId/scopes from the URL is not data fetching, so it stays a
+// plain computed value rather than a loader or query.
+function readConsentParams() {
+  const params = new URLSearchParams(window.location.search);
+  const scope = params.get('scope');
+  return {
+    clientId: params.get('client_id'),
+    scopes: scope ? scope.split(' ').filter(Boolean) : [],
+  };
+}
+
 function ConsentPage() {
   const session = useSession();
-  const [clientInfo, setClientInfo] = useState<ClientInfo | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isFetching, setIsFetching] = useState(true);
-  const [error, setError] = useState('');
+  const { clientId, scopes } = readConsentParams();
 
-  const { clientId, scopes } = useMemo(() => {
-    const params = new URLSearchParams(window.location.search);
-    const scope = params.get('scope');
-    return {
-      clientId: params.get('client_id'),
-      scopes: scope ? scope.split(' ').filter(Boolean) : [],
-    };
-  }, []);
+  // Loader-vs-query (ADR-0007): queries own non-gating server data; loaders gate
+  // the render. The client-info read does NOT gate — the page renders correctly
+  // without it (falling back to clientId as the name) and its errors are
+  // non-fatal — so it's a useQuery, not a loader. The only "invalid request"
+  // gate is the purely-local missing-clientId check below, which needs no fetch.
+  const clientQuery = useQuery({
+    queryKey: queryKeys.oauthClient(clientId ?? ''),
+    queryFn: () => fetchOAuthClient(clientId as string),
+    enabled: Boolean(session.data?.user && clientId),
+  });
+  const clientInfo = clientQuery.data ?? null;
 
-  useEffect(() => {
-    if (!session.data?.user || !clientId) {
-      setIsFetching(false);
-      return;
-    }
+  // Submit is a gating write, so it's a useMutation; on success we perform the
+  // cross-origin redirect back to the OAuth client's callback.
+  const consentMutation = useMutation({
+    mutationFn: submitConsent,
+    onSuccess: ({ url }) => {
+      window.location.href = url;
+    },
+  });
+  const isLoading = consentMutation.isPending;
+  const error = consentMutation.error?.message ?? '';
 
-    authClient
-      .$fetch(`/oauth2/public-client?client_id=${encodeURIComponent(clientId)}`)
-      .then(({ data, error: fetchError }) => {
-        if (fetchError) {
-          // Non-fatal: we can still show consent with clientId as fallback name
-          console.warn('Failed to fetch client info:', fetchError);
-        } else if (data) {
-          setClientInfo(data as ClientInfo);
-        }
-      })
-      .catch(() => {
-        console.warn('Failed to fetch client info');
-      })
-      .finally(() => {
-        setIsFetching(false);
-      });
-  }, [session.data?.user?.id, clientId]);
-
-  const handleConsent = async (accept: boolean) => {
-    setError('');
-    setIsLoading(true);
-
-    try {
-      const response = await authClient.$fetch('/oauth2/consent', {
-        method: 'POST',
-        body: { accept },
-      });
-
-      if (response.error) {
-        setError(
-          (response.error as { message?: string }).message ||
-            'An error occurred while processing your consent.',
-        );
-        setIsLoading(false);
-        return;
-      }
-
-      const data = response.data as { url?: string } | null;
-      if (data?.url) {
-        // Cross-origin redirect back to the OAuth client's callback
-        window.location.href = data.url;
-        return;
-      }
-
-      setError('Unexpected response from the server.');
-      setIsLoading(false);
-    } catch {
-      setError('An unexpected error occurred. Please try again.');
-      setIsLoading(false);
-    }
+  const handleConsent = (accept: boolean) => {
+    // Clear any error from a prior failed attempt so the derived `error` string
+    // blanks out synchronously on retry; TanStack Query otherwise keeps
+    // mutation.error populated until the new attempt resolves.
+    consentMutation.reset();
+    consentMutation.mutate(accept);
   };
 
   if (!session.isPending && !session.data?.user) {
@@ -138,7 +103,7 @@ function ConsentPage() {
     );
   }
 
-  if (session.isPending || isFetching) {
+  if (session.isPending || clientQuery.isLoading) {
     return (
       <ConsentShell>
         <CardHeader>

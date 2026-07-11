@@ -1,11 +1,12 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { Copy, Check } from 'lucide-react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { useSession, updateUser, changeEmail, changePassword } from '../../lib/auth-client';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
 import { PASSWORD_MIN_LENGTH, mcpConnectorSchema } from '@repo/shared';
 import { apiFetchParsed } from '../../lib/api';
+import { queryKeys } from '../../lib/query-keys';
 
 export const Route = createFileRoute('/_app/account')({
   component: AccountPage,
@@ -15,32 +16,21 @@ function AccountPage() {
   const session = useSession();
   const user = session.data?.user;
 
-  // Name editing state
+  // Form-input / edit-toggle state is UI state and stays local.
   const [name, setName] = useState('');
   const [isEditingName, setIsEditingName] = useState(false);
-  const [nameLoading, setNameLoading] = useState(false);
-  const [nameError, setNameError] = useState('');
-  const [nameSuccess, setNameSuccess] = useState('');
 
-  // Email editing state
   const [newEmail, setNewEmail] = useState('');
   const [isEditingEmail, setIsEditingEmail] = useState(false);
-  const [emailLoading, setEmailLoading] = useState(false);
-  const [emailError, setEmailError] = useState('');
-  const [emailSuccess, setEmailSuccess] = useState('');
 
-  // Password change state
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isChangingPassword, setIsChangingPassword] = useState(false);
-  const [passwordLoading, setPasswordLoading] = useState(false);
-  const [passwordError, setPasswordError] = useState('');
-  const [passwordSuccess, setPasswordSuccess] = useState('');
 
-  // MCP connector
+  // MCP connector URL — server state, read through the shared query key.
   const mcpQuery = useQuery({
-    queryKey: ['me', 'mcp-connector'],
+    queryKey: queryKeys.mcpConnector(),
     queryFn: () => apiFetchParsed('/api/me/mcp-connector', mcpConnectorSchema),
   });
   const mcpUrl = mcpQuery.data?.url ?? '';
@@ -63,94 +53,70 @@ function AccountPage() {
     copyTimerRef.current = setTimeout(() => setCopied(false), 2000);
   };
 
-  // Handle name update
-  const handleNameUpdate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setNameError('');
-    setNameSuccess('');
-    setNameLoading(true);
-
-    try {
-      const response = await updateUser({ name });
-
+  // Identity writes: name/email live in Better Auth's session (not a TanStack
+  // Query), so on success we refresh identity via session.refetch() rather than
+  // invalidating a query. Each mutation owns its loading/error/success state.
+  const nameMutation = useMutation({
+    mutationFn: async (nextName: string) => {
+      const response = await updateUser({ name: nextName });
       if (response.error) {
-        setNameError(response.error.message || 'Failed to update name');
-      } else {
-        setNameSuccess('Name updated successfully');
-        setIsEditingName(false);
-        // Refresh session to get updated user data
-        await session.refetch();
+        throw new Error(response.error.message || 'Failed to update name');
       }
-    } catch {
-      setNameError('An unexpected error occurred');
-    } finally {
-      setNameLoading(false);
-    }
-  };
+    },
+    onSuccess: async () => {
+      setIsEditingName(false);
+      await session.refetch();
+    },
+  });
 
-  // Handle email update
-  const handleEmailUpdate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setEmailError('');
-    setEmailSuccess('');
-    setEmailLoading(true);
-
-    try {
-      const response = await changeEmail(newEmail);
-
+  const emailMutation = useMutation({
+    mutationFn: async (nextEmail: string) => {
+      const response = await changeEmail(nextEmail);
       if (response.error) {
-        setEmailError(response.error.message || 'Failed to update email');
-      } else {
-        setEmailSuccess('Email updated successfully');
-        setIsEditingEmail(false);
-        setNewEmail('');
-        // Refresh session to get updated user data
-        await session.refetch();
+        throw new Error(response.error.message || 'Failed to update email');
       }
-    } catch {
-      setEmailError('An unexpected error occurred');
-    } finally {
-      setEmailLoading(false);
-    }
-  };
+    },
+    onSuccess: async () => {
+      setIsEditingEmail(false);
+      setNewEmail('');
+      await session.refetch();
+    },
+  });
 
-  // Handle password change
-  const handlePasswordChange = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setPasswordError('');
-    setPasswordSuccess('');
-
-    // Validate passwords match
-    if (newPassword !== confirmPassword) {
-      setPasswordError('New passwords do not match');
-      return;
-    }
-
-    if (newPassword.length < PASSWORD_MIN_LENGTH) {
-      setPasswordError(`Password must be at least ${PASSWORD_MIN_LENGTH} characters`);
-      return;
-    }
-
-    setPasswordLoading(true);
-
-    try {
+  const passwordMutation = useMutation({
+    mutationFn: async () => {
+      if (newPassword !== confirmPassword) {
+        throw new Error('New passwords do not match');
+      }
+      if (newPassword.length < PASSWORD_MIN_LENGTH) {
+        throw new Error(`Password must be at least ${PASSWORD_MIN_LENGTH} characters`);
+      }
       const response = await changePassword(currentPassword, newPassword);
-
       if (response.error) {
-        setPasswordError(response.error.message || 'Failed to change password');
-      } else {
-        setPasswordSuccess('Password changed successfully');
-        setIsChangingPassword(false);
-        // Clear form
-        setCurrentPassword('');
-        setNewPassword('');
-        setConfirmPassword('');
+        throw new Error(response.error.message || 'Failed to change password');
       }
-    } catch {
-      setPasswordError('An unexpected error occurred');
-    } finally {
-      setPasswordLoading(false);
-    }
+    },
+    onSuccess: () => {
+      setIsChangingPassword(false);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+    },
+  });
+
+  const handleNameUpdate = (e: React.FormEvent) => {
+    e.preventDefault();
+    nameMutation.mutate(name);
+  };
+
+  const handleEmailUpdate = (e: React.FormEvent) => {
+    e.preventDefault();
+    emailMutation.mutate(newEmail);
+  };
+
+  const handlePasswordChange = (e: React.FormEvent) => {
+    e.preventDefault();
+    passwordMutation.mutate();
   };
 
   return (
@@ -166,7 +132,9 @@ function AccountPage() {
           <CardContent className="space-y-6">
             {/* Name Section */}
             <div>
-              <Label htmlFor="name" className="text-sm text-muted-foreground">Name</Label>
+              <Label htmlFor="name" className="text-sm text-muted-foreground">
+                Name
+              </Label>
               {!isEditingName ? (
                 <div className="flex items-center justify-between mt-1">
                   <p className="text-lg">{user?.name || 'Not set'}</p>
@@ -176,8 +144,7 @@ function AccountPage() {
                     onClick={() => {
                       setIsEditingName(true);
                       setName(user?.name || '');
-                      setNameError('');
-                      setNameSuccess('');
+                      nameMutation.reset();
                     }}
                   >
                     Edit
@@ -191,16 +158,12 @@ function AccountPage() {
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     placeholder="Enter your name"
-                    disabled={nameLoading}
+                    disabled={nameMutation.isPending}
                     required
                   />
                   <div className="flex gap-2">
-                    <Button
-                      type="submit"
-                      size="sm"
-                      disabled={nameLoading}
-                    >
-                      {nameLoading ? 'Saving...' : 'Save'}
+                    <Button type="submit" size="sm" disabled={nameMutation.isPending}>
+                      {nameMutation.isPending ? 'Saving...' : 'Save'}
                     </Button>
                     <Button
                       type="button"
@@ -208,27 +171,28 @@ function AccountPage() {
                       size="sm"
                       onClick={() => {
                         setIsEditingName(false);
-                        setNameError('');
-                        setNameSuccess('');
+                        nameMutation.reset();
                       }}
-                      disabled={nameLoading}
+                      disabled={nameMutation.isPending}
                     >
                       Cancel
                     </Button>
                   </div>
                 </form>
               )}
-              {nameError && (
-                <p className="text-sm text-destructive mt-2">{nameError}</p>
+              {nameMutation.error && (
+                <p className="text-sm text-destructive mt-2">{nameMutation.error.message}</p>
               )}
-              {nameSuccess && (
-                <p className="text-sm text-green-600 mt-2">{nameSuccess}</p>
+              {nameMutation.isSuccess && (
+                <p className="text-sm text-green-600 mt-2">Name updated successfully</p>
               )}
             </div>
 
             {/* Email Section */}
             <div>
-              <Label htmlFor="email" className="text-sm text-muted-foreground">Email</Label>
+              <Label htmlFor="email" className="text-sm text-muted-foreground">
+                Email
+              </Label>
               {!isEditingEmail ? (
                 <div className="flex items-center justify-between mt-1">
                   <p className="text-lg">{user?.email}</p>
@@ -238,8 +202,7 @@ function AccountPage() {
                     onClick={() => {
                       setIsEditingEmail(true);
                       setNewEmail('');
-                      setEmailError('');
-                      setEmailSuccess('');
+                      emailMutation.reset();
                     }}
                   >
                     Edit
@@ -253,16 +216,12 @@ function AccountPage() {
                     value={newEmail}
                     onChange={(e) => setNewEmail(e.target.value)}
                     placeholder="Enter new email"
-                    disabled={emailLoading}
+                    disabled={emailMutation.isPending}
                     required
                   />
                   <div className="flex gap-2">
-                    <Button
-                      type="submit"
-                      size="sm"
-                      disabled={emailLoading}
-                    >
-                      {emailLoading ? 'Saving...' : 'Save'}
+                    <Button type="submit" size="sm" disabled={emailMutation.isPending}>
+                      {emailMutation.isPending ? 'Saving...' : 'Save'}
                     </Button>
                     <Button
                       type="button"
@@ -270,21 +229,20 @@ function AccountPage() {
                       size="sm"
                       onClick={() => {
                         setIsEditingEmail(false);
-                        setEmailError('');
-                        setEmailSuccess('');
+                        emailMutation.reset();
                       }}
-                      disabled={emailLoading}
+                      disabled={emailMutation.isPending}
                     >
                       Cancel
                     </Button>
                   </div>
                 </form>
               )}
-              {emailError && (
-                <p className="text-sm text-destructive mt-2">{emailError}</p>
+              {emailMutation.error && (
+                <p className="text-sm text-destructive mt-2">{emailMutation.error.message}</p>
               )}
-              {emailSuccess && (
-                <p className="text-sm text-green-600 mt-2">{emailSuccess}</p>
+              {emailMutation.isSuccess && (
+                <p className="text-sm text-green-600 mt-2">Email updated successfully</p>
               )}
             </div>
           </CardContent>
@@ -301,8 +259,7 @@ function AccountPage() {
                 variant="outline"
                 onClick={() => {
                   setIsChangingPassword(true);
-                  setPasswordError('');
-                  setPasswordSuccess('');
+                  passwordMutation.reset();
                 }}
               >
                 Change Password
@@ -317,7 +274,7 @@ function AccountPage() {
                     value={currentPassword}
                     onChange={(e) => setCurrentPassword(e.target.value)}
                     placeholder="Enter current password"
-                    disabled={passwordLoading}
+                    disabled={passwordMutation.isPending}
                     required
                   />
                 </div>
@@ -329,7 +286,7 @@ function AccountPage() {
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     placeholder="Enter new password"
-                    disabled={passwordLoading}
+                    disabled={passwordMutation.isPending}
                     required
                     minLength={PASSWORD_MIN_LENGTH}
                   />
@@ -345,16 +302,13 @@ function AccountPage() {
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     placeholder="Confirm new password"
-                    disabled={passwordLoading}
+                    disabled={passwordMutation.isPending}
                     required
                   />
                 </div>
                 <div className="flex gap-2">
-                  <Button
-                    type="submit"
-                    disabled={passwordLoading}
-                  >
-                    {passwordLoading ? 'Changing...' : 'Change Password'}
+                  <Button type="submit" disabled={passwordMutation.isPending}>
+                    {passwordMutation.isPending ? 'Changing...' : 'Change Password'}
                   </Button>
                   <Button
                     type="button"
@@ -364,21 +318,20 @@ function AccountPage() {
                       setCurrentPassword('');
                       setNewPassword('');
                       setConfirmPassword('');
-                      setPasswordError('');
-                      setPasswordSuccess('');
+                      passwordMutation.reset();
                     }}
-                    disabled={passwordLoading}
+                    disabled={passwordMutation.isPending}
                   >
                     Cancel
                   </Button>
                 </div>
               </form>
             )}
-            {passwordError && (
-              <p className="text-sm text-destructive mt-2">{passwordError}</p>
+            {passwordMutation.error && (
+              <p className="text-sm text-destructive mt-2">{passwordMutation.error.message}</p>
             )}
-            {passwordSuccess && (
-              <p className="text-sm text-green-600 mt-2">{passwordSuccess}</p>
+            {passwordMutation.isSuccess && (
+              <p className="text-sm text-green-600 mt-2">Password changed successfully</p>
             )}
           </CardContent>
         </Card>
@@ -393,9 +346,7 @@ function AccountPage() {
               Connect AI agents like Claude Desktop, Claude.ai, or Cursor to your account.
             </p>
 
-            {mcpQuery.isLoading && (
-              <p className="text-sm text-muted-foreground">Loading...</p>
-            )}
+            {mcpQuery.isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
             {mcpQuery.error && (
               <p className="text-sm text-destructive">Failed to load MCP connector URL</p>
             )}
@@ -417,7 +368,10 @@ function AccountPage() {
 
                 <ol className="list-decimal list-inside text-sm text-muted-foreground space-y-1">
                   <li>Copy the URL above.</li>
-                  <li>In Claude Desktop: Settings &rarr; Connectors &rarr; Add custom connector &rarr; paste.</li>
+                  <li>
+                    In Claude Desktop: Settings &rarr; Connectors &rarr; Add custom connector &rarr;
+                    paste.
+                  </li>
                   <li>Sign in and approve access when prompted.</li>
                 </ol>
               </>

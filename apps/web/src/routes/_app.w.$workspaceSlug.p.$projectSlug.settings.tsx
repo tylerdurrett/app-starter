@@ -1,5 +1,6 @@
-import { createFileRoute, getRouteApi, useNavigate, useRouter } from '@tanstack/react-router';
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { createFileRoute, getRouteApi, useNavigate } from '@tanstack/react-router';
+import { useState, useEffect, useRef } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
 import { useSession } from '../lib/auth-client';
 import { ApiError } from '../lib/api';
@@ -8,14 +9,16 @@ import { resolveProject } from '../lib/project-resolver';
 import {
   updateProject,
   deleteProject,
-  listProjectMembers,
   removeProjectMember,
-  listProjectInvites,
   createProjectInvite,
   revokeProjectInvite,
-  type ProjectMember,
-  type ProjectInvite,
 } from '../lib/projects';
+import { queryKeys } from '../lib/query-keys';
+import {
+  projectQueryOptions,
+  projectMembersQueryOptions,
+  projectInvitesQueryOptions,
+} from '../lib/project-queries';
 import { Copy, UserMinus, X } from 'lucide-react';
 
 const projectRoute = getRouteApi('/_app/w/$workspaceSlug/p/$projectSlug');
@@ -25,28 +28,22 @@ export const Route = createFileRoute('/_app/w/$workspaceSlug/p/$projectSlug/sett
 });
 
 function ProjectSettingsPage() {
+  // Loader data is gating-derived only: workspaceSlug/slug/role don't change on
+  // this page. The mutable display name is read via useQuery in each section
+  // (seeded by the layout loader) so a rename refreshes live (ADR-0007).
   const { project } = projectRoute.useLoaderData();
-  const { role } = project;
+  const { workspaceSlug, slug, role } = project;
 
   return (
     <div className="p-8">
       <div className="max-w-3xl mx-auto space-y-6">
         <h1 className="text-3xl font-bold">Settings</h1>
 
-        <GeneralSection
-          workspaceSlug={project.workspaceSlug}
-          projectName={project.name}
-          projectSlug={project.slug}
-          role={role}
-        />
-        <MembersSection workspaceSlug={project.workspaceSlug} slug={project.slug} role={role} />
-        <InvitesSection workspaceSlug={project.workspaceSlug} slug={project.slug} role={role} />
+        <GeneralSection workspaceSlug={workspaceSlug} projectSlug={slug} role={role} />
+        <MembersSection workspaceSlug={workspaceSlug} slug={slug} role={role} />
+        <InvitesSection workspaceSlug={workspaceSlug} slug={slug} role={role} />
         {canProject(role, 'project:delete') && (
-          <DangerZoneSection
-            workspaceSlug={project.workspaceSlug}
-            projectName={project.name}
-            projectSlug={project.slug}
-          />
+          <DangerZoneSection workspaceSlug={workspaceSlug} projectSlug={slug} />
         )}
       </div>
     </div>
@@ -55,41 +52,37 @@ function ProjectSettingsPage() {
 
 function GeneralSection({
   workspaceSlug,
-  projectName,
   projectSlug,
   role,
 }: {
   workspaceSlug: string;
-  projectName: string;
   projectSlug: string;
   role: ProjectRole;
 }) {
-  const router = useRouter();
+  const queryClient = useQueryClient();
+  // Read the mutable name through the loader-seeded cache so the rename
+  // invalidation below refreshes it without a page reload (ADR-0007).
+  const projectQuery = useQuery(projectQueryOptions(workspaceSlug, projectSlug));
+  const projectName = projectQuery.data?.name ?? '';
   const [isEditingName, setIsEditingName] = useState(false);
   const [name, setName] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
 
-  const handleSaveName = async (e: React.FormEvent) => {
+  const renameMutation = useMutation({
+    mutationFn: (nextName: string) => updateProject(workspaceSlug, projectSlug, { name: nextName }),
+    onSuccess: async () => {
+      setIsEditingName(false);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.project(workspaceSlug, projectSlug) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.projects(workspaceSlug) }),
+      ]);
+    },
+  });
+
+  const handleSaveName = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = name.trim();
     if (!trimmed) return;
-
-    setError('');
-    setSuccess('');
-    setIsLoading(true);
-
-    try {
-      await updateProject(workspaceSlug, projectSlug, { name: trimmed });
-      setSuccess('Name updated');
-      setIsEditingName(false);
-      await router.invalidate();
-    } catch {
-      setError('Failed to update project name');
-    } finally {
-      setIsLoading(false);
-    }
+    renameMutation.mutate(trimmed);
   };
 
   return (
@@ -110,8 +103,7 @@ function GeneralSection({
                   onClick={() => {
                     setIsEditingName(true);
                     setName(projectName);
-                    setError('');
-                    setSuccess('');
+                    renameMutation.reset();
                   }}
                 >
                   Edit
@@ -125,13 +117,13 @@ function GeneralSection({
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Project name"
-                disabled={isLoading}
+                disabled={renameMutation.isPending}
                 required
                 autoFocus
               />
               <div className="flex gap-2">
-                <Button type="submit" size="sm" disabled={isLoading || !name.trim()}>
-                  {isLoading ? 'Saving...' : 'Save'}
+                <Button type="submit" size="sm" disabled={renameMutation.isPending || !name.trim()}>
+                  {renameMutation.isPending ? 'Saving...' : 'Save'}
                 </Button>
                 <Button
                   type="button"
@@ -139,10 +131,9 @@ function GeneralSection({
                   size="sm"
                   onClick={() => {
                     setIsEditingName(false);
-                    setError('');
-                    setSuccess('');
+                    renameMutation.reset();
                   }}
-                  disabled={isLoading}
+                  disabled={renameMutation.isPending}
                 >
                   Cancel
                 </Button>
@@ -151,8 +142,10 @@ function GeneralSection({
           )}
         </div>
 
-        {error && <p className="text-sm text-destructive">{error}</p>}
-        {success && <p className="text-sm text-green-600">{success}</p>}
+        {renameMutation.isError && (
+          <p className="text-sm text-destructive">Failed to update project name</p>
+        )}
+        {renameMutation.isSuccess && <p className="text-sm text-green-600">Name updated</p>}
 
         <div>
           <Label className="text-sm text-muted-foreground">Slug</Label>
@@ -166,39 +159,16 @@ function GeneralSection({
 function MembersSection({ workspaceSlug, slug, role }: { workspaceSlug: string; slug: string; role: ProjectRole }) {
   const session = useSession();
   const currentUserId = session.data?.user?.id;
+  const queryClient = useQueryClient();
 
-  const [members, setMembers] = useState<ProjectMember[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [removingId, setRemovingId] = useState<string | null>(null);
+  const membersQuery = useQuery(projectMembersQueryOptions(workspaceSlug, slug));
+  const members = membersQuery.data ?? [];
 
-  const fetchMembers = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      setMembers(await listProjectMembers(workspaceSlug, slug));
-    } catch {
-      setError('Failed to load members');
-    } finally {
-      setLoading(false);
-    }
-  }, [workspaceSlug, slug]);
-
-  useEffect(() => {
-    fetchMembers();
-  }, [fetchMembers]);
-
-  const handleRemove = async (userId: string) => {
-    setRemovingId(userId);
-    try {
-      await removeProjectMember(workspaceSlug, slug, userId);
-      setMembers((prev) => prev.filter((m) => m.userId !== userId));
-    } catch {
-      setError('Failed to remove member');
-    } finally {
-      setRemovingId(null);
-    }
-  };
+  const removeMutation = useMutation({
+    mutationFn: (userId: string) => removeProjectMember(workspaceSlug, slug, userId),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: queryKeys.projectMembers(workspaceSlug, slug) }),
+  });
 
   return (
     <Card>
@@ -206,12 +176,15 @@ function MembersSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
         <CardTitle>Members</CardTitle>
       </CardHeader>
       <CardContent>
-        {loading && <p className="text-sm text-muted-foreground">Loading...</p>}
-        {error && <p className="text-sm text-destructive">{error}</p>}
-        {!loading && !error && members.length === 0 && (
+        {membersQuery.isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
+        {membersQuery.isError && <p className="text-sm text-destructive">Failed to load members</p>}
+        {removeMutation.isError && (
+          <p className="text-sm text-destructive">Failed to remove member</p>
+        )}
+        {!membersQuery.isLoading && !membersQuery.isError && members.length === 0 && (
           <p className="text-sm text-muted-foreground">No members found.</p>
         )}
-        {!loading && members.length > 0 && (
+        {!membersQuery.isLoading && members.length > 0 && (
           <ul className="divide-y divide-border">
             {members.map((member) => {
               const isCurrentUser = member.userId === currentUserId;
@@ -234,8 +207,10 @@ function MembersSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
                       <Button
                         variant="ghost"
                         size="icon"
-                        onClick={() => handleRemove(member.userId)}
-                        disabled={removingId === member.userId}
+                        onClick={() => removeMutation.mutate(member.userId)}
+                        disabled={
+                          removeMutation.isPending && removeMutation.variables === member.userId
+                        }
                         title="Remove member"
                       >
                         <UserMinus className="w-4 h-4 text-destructive" />
@@ -253,63 +228,53 @@ function MembersSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
 }
 
 function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; slug: string; role: ProjectRole }) {
-  const [invites, setInvites] = useState<ProjectInvite[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const queryClient = useQueryClient();
 
   const [showInviteForm, setShowInviteForm] = useState(false);
   const [email, setEmail] = useState('');
   const [selectedRole, setSelectedRole] = useState<'manager' | 'member'>('member');
-  const [isInviting, setIsInviting] = useState(false);
-  const [inviteError, setInviteError] = useState('');
   const [inviteUrl, setInviteUrl] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const [revokingId, setRevokingId] = useState<string | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => () => clearTimeout(copyTimerRef.current), []);
 
-  const fetchInvites = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      setInvites(await listProjectInvites(workspaceSlug, slug));
-    } catch {
-      setError('Failed to load invites');
-    } finally {
-      setLoading(false);
-    }
-  }, [workspaceSlug, slug]);
+  const invitesQuery = useQuery(projectInvitesQueryOptions(workspaceSlug, slug));
+  const invites = invitesQuery.data ?? [];
 
-  useEffect(() => {
-    fetchInvites();
-  }, [fetchInvites]);
+  const invalidateInvites = () =>
+    queryClient.invalidateQueries({ queryKey: queryKeys.projectInvites(workspaceSlug, slug) });
 
-  const handleInvite = async (e: React.FormEvent) => {
+  const createMutation = useMutation({
+    mutationFn: (trimmedEmail: string) =>
+      createProjectInvite(workspaceSlug, slug, trimmedEmail, selectedRole),
+    onSuccess: (result) => {
+      setInviteUrl(result.inviteUrl);
+      setEmail('');
+      return invalidateInvites();
+    },
+  });
+
+  const revokeMutation = useMutation({
+    mutationFn: (inviteId: string) => revokeProjectInvite(workspaceSlug, slug, inviteId),
+    onSuccess: () => invalidateInvites(),
+  });
+
+  const inviteError =
+    createMutation.error instanceof ApiError && createMutation.error.status === 409
+      ? createMutation.error.parsedMessage || 'Invite conflict'
+      : createMutation.error
+        ? 'Failed to create invite'
+        : '';
+
+  const handleInvite = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = email.trim();
     if (!trimmed) return;
-
-    setInviteError('');
     setInviteUrl('');
     setCopied(false);
-    setIsInviting(true);
-
-    try {
-      const result = await createProjectInvite(workspaceSlug, slug, trimmed, selectedRole);
-      setInviteUrl(result.inviteUrl);
-      setEmail('');
-      setInvites((prev) => [result.invite, ...prev]);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        setInviteError(err.parsedMessage || 'Invite conflict');
-      } else {
-        setInviteError('Failed to create invite');
-      }
-    } finally {
-      setIsInviting(false);
-    }
+    createMutation.mutate(trimmed);
   };
 
   const handleCopy = async () => {
@@ -319,25 +284,13 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
     copyTimerRef.current = setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleRevoke = async (inviteId: string) => {
-    setRevokingId(inviteId);
-    try {
-      await revokeProjectInvite(workspaceSlug, slug, inviteId);
-      setInvites((prev) => prev.filter((inv) => inv.id !== inviteId));
-    } catch {
-      setError('Failed to revoke invite');
-    } finally {
-      setRevokingId(null);
-    }
-  };
-
   const resetInviteForm = () => {
     setShowInviteForm(false);
     setEmail('');
     setSelectedRole('member');
-    setInviteError('');
     setInviteUrl('');
     setCopied(false);
+    createMutation.reset();
   };
 
   return (
@@ -362,7 +315,7 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="colleague@example.com"
-                  disabled={isInviting}
+                  disabled={createMutation.isPending}
                   required
                   autoFocus
                   className="flex-1"
@@ -370,7 +323,7 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
                 <select
                   value={selectedRole}
                   onChange={(e) => setSelectedRole(e.target.value as 'manager' | 'member')}
-                  disabled={isInviting}
+                  disabled={createMutation.isPending}
                   className="px-3 py-2 text-sm border rounded-md bg-background"
                 >
                   <option value="member">Member</option>
@@ -378,15 +331,15 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
                 </select>
               </div>
               <div className="flex gap-2">
-                <Button type="submit" size="sm" disabled={isInviting || !email.trim()}>
-                  {isInviting ? 'Sending...' : 'Send'}
+                <Button type="submit" size="sm" disabled={createMutation.isPending || !email.trim()}>
+                  {createMutation.isPending ? 'Sending...' : 'Send'}
                 </Button>
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
                   onClick={resetInviteForm}
-                  disabled={isInviting}
+                  disabled={createMutation.isPending}
                 >
                   Cancel
                 </Button>
@@ -405,12 +358,15 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
           </div>
         )}
 
-        {loading && <p className="text-sm text-muted-foreground">Loading...</p>}
-        {error && <p className="text-sm text-destructive">{error}</p>}
-        {!loading && !error && invites.length === 0 && (
+        {invitesQuery.isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
+        {invitesQuery.isError && <p className="text-sm text-destructive">Failed to load invites</p>}
+        {revokeMutation.isError && (
+          <p className="text-sm text-destructive">Failed to revoke invite</p>
+        )}
+        {!invitesQuery.isLoading && !invitesQuery.isError && invites.length === 0 && (
           <p className="text-sm text-muted-foreground">No pending invites.</p>
         )}
-        {!loading && invites.length > 0 && (
+        {!invitesQuery.isLoading && invites.length > 0 && (
           <ul className="divide-y divide-border">
             {invites.map((inv) => (
               <li key={inv.id} className="flex items-center justify-between py-3">
@@ -425,8 +381,8 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => handleRevoke(inv.id)}
-                    disabled={revokingId === inv.id}
+                    onClick={() => revokeMutation.mutate(inv.id)}
+                    disabled={revokeMutation.isPending && revokeMutation.variables === inv.id}
                     title="Revoke invite"
                   >
                     <X className="w-4 h-4 text-destructive" />
@@ -443,37 +399,37 @@ function InvitesSection({ workspaceSlug, slug, role }: { workspaceSlug: string; 
 
 function DangerZoneSection({
   workspaceSlug,
-  projectName,
   projectSlug,
 }: {
   workspaceSlug: string;
-  projectName: string;
   projectSlug: string;
 }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  // The delete-confirmation phrase embeds the live name, so read it from the
+  // loader-seeded cache too (ADR-0007) — a rename keeps the phrase in sync.
+  const projectQuery = useQuery(projectQueryOptions(workspaceSlug, projectSlug));
+  const projectName = projectQuery.data?.name ?? '';
   const [showConfirm, setShowConfirm] = useState(false);
   const [confirmation, setConfirmation] = useState('');
-  const [isDeleting, setIsDeleting] = useState(false);
-  const [error, setError] = useState('');
 
   const expectedConfirmation = `Delete ${projectName}`;
 
-  const handleDelete = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (confirmation !== expectedConfirmation) return;
-
-    setError('');
-    setIsDeleting(true);
-
-    try {
-      await deleteProject(workspaceSlug, projectSlug, confirmation);
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteProject(workspaceSlug, projectSlug, confirmation),
+    onSuccess: async () => {
+      // Drop the removed project from any cached project lists before leaving.
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projects(workspaceSlug) });
       // Resolve next destination after deletion
       const target = await resolveProject();
       await navigate(target);
-    } catch {
-      setError('Failed to delete project');
-      setIsDeleting(false);
-    }
+    },
+  });
+
+  const handleDelete = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (confirmation !== expectedConfirmation) return;
+    deleteMutation.mutate();
   };
 
   return (
@@ -508,18 +464,20 @@ function DangerZoneSection({
               value={confirmation}
               onChange={(e) => setConfirmation(e.target.value)}
               placeholder={expectedConfirmation}
-              disabled={isDeleting}
+              disabled={deleteMutation.isPending}
               autoFocus
             />
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {deleteMutation.isError && (
+              <p className="text-sm text-destructive">Failed to delete project</p>
+            )}
             <div className="flex gap-2">
               <Button
                 type="submit"
                 variant="destructive"
                 size="sm"
-                disabled={isDeleting || confirmation !== expectedConfirmation}
+                disabled={deleteMutation.isPending || confirmation !== expectedConfirmation}
               >
-                {isDeleting ? 'Deleting...' : 'Permanently delete'}
+                {deleteMutation.isPending ? 'Deleting...' : 'Permanently delete'}
               </Button>
               <Button
                 type="button"
@@ -528,9 +486,9 @@ function DangerZoneSection({
                 onClick={() => {
                   setShowConfirm(false);
                   setConfirmation('');
-                  setError('');
+                  deleteMutation.reset();
                 }}
-                disabled={isDeleting}
+                disabled={deleteMutation.isPending}
               >
                 Cancel
               </Button>

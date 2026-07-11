@@ -2,13 +2,20 @@ import { createFileRoute, Outlet, notFound, useNavigate } from '@tanstack/react-
 import { useState } from 'react';
 import { Button } from '@repo/ui';
 import { getProject } from '../lib/projects';
+import { queryKeys } from '../lib/query-keys';
 import { ApiError } from '../lib/api';
 import { resolveProject } from '../lib/project-resolver';
 
 export const Route = createFileRoute('/_app/w/$workspaceSlug/p/$projectSlug')({
-  loader: async ({ params }) => {
+  loader: async ({ params, context }) => {
     try {
       const project = await getProject(params.workspaceSlug, params.projectSlug);
+      // Gate passed — seed the query cache so the settings component's useQuery
+      // reads this same value (ADR-0007) and a rename refreshes live.
+      context.queryClient.setQueryData(
+        queryKeys.project(params.workspaceSlug, params.projectSlug),
+        project,
+      );
       return { project };
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
