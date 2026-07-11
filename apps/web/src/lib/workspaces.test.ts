@@ -153,4 +153,10 @@ describe('apiFetchParsed boundary', () => {
     await listWorkspaceInvites('acme');
     expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme/invites');
   });
+
+  it('lists projects from the correct workspace route template', async () => {
+    const { listProjectsForWorkspace } = await loadLibReturning([]);
+    await listProjectsForWorkspace('acme');
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme/projects');
+  });
 });
