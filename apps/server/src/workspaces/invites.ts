@@ -1,208 +1,147 @@
 import { db, workspaceInvites, workspaceMemberships, workspaces, users } from '@repo/db';
 import { eq, and } from 'drizzle-orm';
-import { randomUUID, createHash } from 'node:crypto';
-import { resolveWorkspaceAndRole, ServiceError } from './service.js';
-import type { WorkspaceRole } from './permissions.js';
+import {
+  ServiceError,
+  listInvites as sharedListInvites,
+  createInvite as sharedCreateInvite,
+  revokeInvite as sharedRevokeInvite,
+  getInviteByToken as sharedGetInviteByToken,
+  acceptInvite as sharedAcceptInvite,
+  type InviteLifecycleConfig,
+  type ResolveEntity,
+} from '../tenancy/index.js';
+import { resolveWorkspaceAndRole } from './service.js';
+import type { WorkspacePermission } from './permissions.js';
 
-const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-function hashToken(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
+/** Token-metadata projection returned by getInviteByToken for the workspace level. */
+interface WorkspaceInviteTokenMeta {
+  id: string;
+  workspaceId: string;
+  email: string;
+  role: string;
+  status: string;
+  expiresAt: Date;
+  workspaceName: string;
+  workspaceSlug: string;
 }
 
-export async function listInvites(slug: string, actorUserId: string) {
-  const { workspace } = await resolveWorkspaceAndRole(slug, actorUserId, 'workspace:invites:list');
-
-  return db
-    .select({
-      id: workspaceInvites.id,
-      email: workspaceInvites.email,
-      role: workspaceInvites.role,
-      status: workspaceInvites.status,
-      expiresAt: workspaceInvites.expiresAt,
-      createdAt: workspaceInvites.createdAt,
-      invitedByName: users.name,
-    })
-    .from(workspaceInvites)
-    .innerJoin(users, eq(workspaceInvites.invitedByUserId, users.id))
-    .where(
-      and(
-        eq(workspaceInvites.workspaceId, workspace.id),
-        eq(workspaceInvites.status, 'pending'),
-      ),
-    );
+interface WorkspaceAcceptResult {
+  workspaceId: string;
+  workspaceSlug: string;
+  workspaceName: string;
 }
 
-export async function createInvite(
-  slug: string,
-  actorUserId: string,
-  { email, role = 'member' }: { email: string; role?: 'manager' | 'member' },
-) {
-  const { workspace } = await resolveWorkspaceAndRole(slug, actorUserId, 'workspace:members:invite');
-  const normalizedEmail = email.toLowerCase().trim();
+const config: InviteLifecycleConfig<
+  WorkspacePermission,
+  WorkspaceInviteTokenMeta,
+  WorkspaceAcceptResult
+> = {
+  entityLabel: 'workspace',
+  permissions: {
+    list: 'workspace:invites:list',
+    invite: 'workspace:members:invite',
+    revoke: 'workspace:invites:revoke',
+  },
+  invites: {
+    table: workspaceInvites,
+    id: workspaceInvites.id,
+    email: workspaceInvites.email,
+    role: workspaceInvites.role,
+    status: workspaceInvites.status,
+    expiresAt: workspaceInvites.expiresAt,
+    createdAt: workspaceInvites.createdAt,
+    invitedByUserId: workspaceInvites.invitedByUserId,
+    entityId: workspaceInvites.workspaceId,
+    entityIdKey: 'workspaceId',
+  },
+  memberships: {
+    table: workspaceMemberships,
+    userId: workspaceMemberships.userId,
+    entityId: workspaceMemberships.workspaceId,
+    entityIdKey: 'workspaceId',
+  },
+  async selectByTokenHash(tokenHash) {
+    const [invite] = await db
+      .select({
+        id: workspaceInvites.id,
+        workspaceId: workspaceInvites.workspaceId,
+        email: workspaceInvites.email,
+        role: workspaceInvites.role,
+        status: workspaceInvites.status,
+        expiresAt: workspaceInvites.expiresAt,
+        workspaceName: workspaces.name,
+        workspaceSlug: workspaces.slug,
+      })
+      .from(workspaceInvites)
+      .innerJoin(workspaces, eq(workspaceInvites.workspaceId, workspaces.id))
+      .where(eq(workspaceInvites.tokenHash, tokenHash));
+    return invite;
+  },
+  // Workspace revoke: fetch by (id, workspaceId) with NO status filter, throw
+  // NOT_FOUND when absent and CONFLICT when non-pending, then a VOID update.
+  async revoke(workspaceId, inviteId) {
+    const [invite] = await db
+      .select()
+      .from(workspaceInvites)
+      .where(and(eq(workspaceInvites.id, inviteId), eq(workspaceInvites.workspaceId, workspaceId)));
 
-  // Check if email is already a member
-  const [existingMember] = await db
-    .select({ userId: workspaceMemberships.userId })
-    .from(workspaceMemberships)
-    .innerJoin(users, eq(workspaceMemberships.userId, users.id))
-    .where(
-      and(
-        eq(workspaceMemberships.workspaceId, workspace.id),
-        eq(users.email, normalizedEmail),
-      ),
-    );
+    if (!invite) throw new ServiceError('NOT_FOUND', 'Invite not found');
 
-  if (existingMember) {
-    throw new ServiceError('CONFLICT', 'User is already a member of this workspace');
-  }
+    if (invite.status !== 'pending') {
+      throw new ServiceError('CONFLICT', 'Invite is not pending');
+    }
 
-  // Check for existing pending invite
-  const [existingInvite] = await db
-    .select({ id: workspaceInvites.id })
-    .from(workspaceInvites)
-    .where(
-      and(
-        eq(workspaceInvites.workspaceId, workspace.id),
-        eq(workspaceInvites.email, normalizedEmail),
-        eq(workspaceInvites.status, 'pending'),
-      ),
-    );
-
-  if (existingInvite) {
-    throw new ServiceError('CONFLICT', 'A pending invite already exists for this email');
-  }
-
-  const rawToken = randomUUID();
-  const tokenHash = hashToken(rawToken);
-  const id = randomUUID();
-  const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
-
-  const [invite] = await db.insert(workspaceInvites).values({
-    id,
-    workspaceId: workspace.id,
-    email: normalizedEmail,
-    role,
-    tokenHash,
-    status: 'pending',
-    invitedByUserId: actorUserId,
-    expiresAt,
-  }).returning();
-
-  return { invite, token: rawToken };
-}
-
-export async function revokeInvite(slug: string, actorUserId: string, inviteId: string) {
-  const { workspace } = await resolveWorkspaceAndRole(slug, actorUserId, 'workspace:invites:revoke');
-
-  const [invite] = await db
-    .select()
-    .from(workspaceInvites)
-    .where(
-      and(
-        eq(workspaceInvites.id, inviteId),
-        eq(workspaceInvites.workspaceId, workspace.id),
-      ),
-    );
-
-  if (!invite) throw new ServiceError('NOT_FOUND', 'Invite not found');
-
-  if (invite.status !== 'pending') {
-    throw new ServiceError('CONFLICT', 'Invite is not pending');
-  }
-
-  await db
-    .update(workspaceInvites)
-    .set({ status: 'revoked' })
-    .where(eq(workspaceInvites.id, inviteId));
-}
-
-export async function getInviteByToken(token: string) {
-  const tokenHash = hashToken(token);
-
-  const [invite] = await db
-    .select({
-      id: workspaceInvites.id,
-      workspaceId: workspaceInvites.workspaceId,
-      email: workspaceInvites.email,
-      role: workspaceInvites.role,
-      status: workspaceInvites.status,
-      expiresAt: workspaceInvites.expiresAt,
-      workspaceName: workspaces.name,
-      workspaceSlug: workspaces.slug,
-    })
-    .from(workspaceInvites)
-    .innerJoin(workspaces, eq(workspaceInvites.workspaceId, workspaces.id))
-    .where(eq(workspaceInvites.tokenHash, tokenHash));
-
-  if (!invite) {
-    throw new ServiceError('NOT_FOUND', 'Invite not found');
-  }
-
-  // Intentionally return metadata for revoked/accepted/expired invites so the
-  // invite landing page can render an explicit terminal-state card. Acceptance
-  // validity is enforced in acceptInvite below.
-  return invite;
-}
-
-export async function acceptInvite(token: string, actorUserId: string) {
-  const invite = await getInviteByToken(token);
-
-  if (invite.status === 'accepted') {
-    throw new ServiceError('CONFLICT', 'This invite has already been accepted');
-  }
-  if (invite.status === 'revoked') {
-    throw new ServiceError('CONFLICT', 'This invite has been revoked');
-  }
-  if (invite.expiresAt < new Date()) {
-    throw new ServiceError('CONFLICT', 'This invite has expired');
-  }
-
-  // Verify actor's email matches invite email
-  const [actor] = await db
-    .select({ email: users.email })
-    .from(users)
-    .where(eq(users.id, actorUserId));
-
-  if (!actor) throw new ServiceError('NOT_FOUND', 'User not found');
-
-  if (actor.email.toLowerCase().trim() !== invite.email) {
-    throw new ServiceError('FORBIDDEN', 'This invite is for a different email address');
-  }
-
-  // Check if already a member
-  const [existingMembership] = await db
-    .select()
-    .from(workspaceMemberships)
-    .where(
-      and(
-        eq(workspaceMemberships.workspaceId, invite.workspaceId),
-        eq(workspaceMemberships.userId, actorUserId),
-      ),
-    );
-
-  if (existingMembership) {
-    throw new ServiceError('CONFLICT', 'You are already a member of this workspace');
-  }
-
-  // Insert membership + mark invite accepted in one transaction
-  await db.transaction(async (tx) => {
-    await tx.insert(workspaceMemberships).values({
-      id: randomUUID(),
-      workspaceId: invite.workspaceId,
-      userId: actorUserId,
-      role: invite.role as WorkspaceRole,
-    });
-
-    await tx
+    await db
       .update(workspaceInvites)
-      .set({ status: 'accepted' })
-      .where(eq(workspaceInvites.id, invite.id));
-  });
+      .set({ status: 'revoked' })
+      .where(eq(workspaceInvites.id, inviteId));
+  },
+  // Workspace email guard: load the actor, throw NOT_FOUND for a missing user,
+  // then compare the normalized stored email against the invite.
+  async emailGuard(userId, inviteEmail) {
+    const [actor] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId));
 
-  return {
+    if (!actor) throw new ServiceError('NOT_FOUND', 'User not found');
+
+    if (actor.email.toLowerCase().trim() !== inviteEmail) {
+      throw new ServiceError('FORBIDDEN', 'This invite is for a different email address');
+    }
+  },
+  membershipEntityId: (invite) => invite.workspaceId,
+  buildAcceptResult: (invite) => ({
     workspaceId: invite.workspaceId,
     workspaceSlug: invite.workspaceSlug,
     workspaceName: invite.workspaceName,
-  };
+  }),
+};
+
+function resolveWorkspace(slug: string, actorUserId: string): ResolveEntity<WorkspacePermission> {
+  return (permission) =>
+    resolveWorkspaceAndRole(slug, actorUserId, permission).then((r) => r.workspace);
+}
+
+export function listInvites(slug: string, actorUserId: string) {
+  return sharedListInvites(config, resolveWorkspace(slug, actorUserId));
+}
+
+export function createInvite(
+  slug: string,
+  actorUserId: string,
+  input: { email: string; role?: 'manager' | 'member' },
+) {
+  return sharedCreateInvite(config, resolveWorkspace(slug, actorUserId), actorUserId, input);
+}
+
+export function revokeInvite(slug: string, actorUserId: string, inviteId: string): Promise<void> {
+  return sharedRevokeInvite(config, resolveWorkspace(slug, actorUserId), inviteId).then(
+    () => undefined,
+  );
+}
+
+export function getInviteByToken(token: string) {
+  return sharedGetInviteByToken(config, token);
+}
+
+export function acceptInvite(token: string, actorUserId: string) {
+  return sharedAcceptInvite(config, token, actorUserId);
 }
