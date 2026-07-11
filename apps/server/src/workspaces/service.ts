@@ -1,11 +1,48 @@
-import { db, workspaces, workspaceMemberships, users, projects, projectMemberships } from '@repo/db';
+import { db, workspaces, workspaceMemberships, projects, projectMemberships } from '@repo/db';
 import { eq, and, asc } from 'drizzle-orm';
-import { randomUUID } from 'node:crypto';
-import { slugify, ensureUniqueSlug } from './slug.js';
+import { ensureUniqueSlug } from './slug.js';
 import { can, type WorkspaceRole, type WorkspacePermission } from './permissions.js';
 
-import { ServiceError, resolveEntityAndRole } from '../tenancy/index.js';
+import {
+  ServiceError,
+  resolveEntityAndRole,
+  createWithOwnerMembership,
+  listMembers as sharedListMembers,
+  removeMember as sharedRemoveMember,
+  type MemberCrudConfig,
+  type ResolveMemberEntity,
+} from '../tenancy/index.js';
 export { ServiceError };
+
+/** Shared member-CRUD config for the workspace level. */
+const memberConfig: MemberCrudConfig<WorkspacePermission> = {
+  permissions: { list: 'workspace:members:list', remove: 'workspace:members:remove' },
+  memberships: {
+    table: workspaceMemberships,
+    userId: workspaceMemberships.userId,
+    role: workspaceMemberships.role,
+    createdAt: workspaceMemberships.createdAt,
+    entityId: workspaceMemberships.workspaceId,
+  },
+  selfRemovalError: { code: 'BAD_REQUEST', message: 'Cannot remove yourself' },
+  // Manager cannot remove the owner (relational rule, not covered by permission matrix)
+  ownerGuard(actorRole, targetRole) {
+    if (actorRole === 'manager' && targetRole === 'owner') {
+      throw new ServiceError('BAD_REQUEST', 'Manager cannot remove the workspace owner');
+    }
+  },
+};
+
+function resolveWorkspaceMember(
+  slug: string,
+  actorUserId: string,
+): ResolveMemberEntity<WorkspacePermission> {
+  return (permission) =>
+    resolveWorkspaceAndRole(slug, actorUserId, permission).then((r) => ({
+      id: r.workspace.id,
+      role: r.role,
+    }));
+}
 
 /**
  * Lookup workspace by slug, verify actor membership, and optionally check permission.
@@ -52,33 +89,14 @@ export async function resolveWorkspaceAndRole(
 }
 
 export async function createWorkspace({ name, ownerUserId }: { name: string; ownerUserId: string }) {
-  let baseSlug = slugify(name);
-  // Fallback for names that produce an empty slug (e.g. all special chars)
-  if (!baseSlug) baseSlug = `workspace-${randomUUID().slice(0, 8)}`;
-
-  const slug = await ensureUniqueSlug(baseSlug);
-  const id = randomUUID();
-
-  const [created] = await db.transaction(async (tx) => {
-    const rows = await tx.insert(workspaces).values({
-      id,
-      name,
-      slug,
-      createdByUserId: ownerUserId
-    }).returning();
-    await tx.insert(workspaceMemberships).values({
-      id: randomUUID(),
-      workspaceId: id,
-      userId: ownerUserId,
-      role: 'owner',
-    });
-    return rows;
+  return createWithOwnerMembership<typeof workspaces.$inferSelect>({
+    name,
+    ownerUserId,
+    slugFallbackPrefix: 'workspace',
+    ensureUniqueSlug: (baseSlug) => ensureUniqueSlug(baseSlug),
+    entity: { table: workspaces, extraFields: { createdByUserId: ownerUserId } },
+    memberships: { table: workspaceMemberships, entityIdKey: 'workspaceId' },
   });
-
-  if (!created) {
-    throw new Error('createWorkspace: insert returned no rows');
-  }
-  return created;
 }
 
 export async function listWorkspacesForUser(userId: string) {
@@ -132,54 +150,16 @@ export async function deleteWorkspace(
 }
 
 export async function listMembers(slug: string, actorUserId: string) {
-  const { workspace } = await resolveWorkspaceAndRole(slug, actorUserId, 'workspace:members:list');
-
-  return db
-    .select({
-      userId: workspaceMemberships.userId,
-      role: workspaceMemberships.role,
-      createdAt: workspaceMemberships.createdAt,
-      name: users.name,
-      email: users.email,
-    })
-    .from(workspaceMemberships)
-    .innerJoin(users, eq(workspaceMemberships.userId, users.id))
-    .where(eq(workspaceMemberships.workspaceId, workspace.id));
+  return sharedListMembers(memberConfig, resolveWorkspaceMember(slug, actorUserId));
 }
 
-export async function removeMember(
-  slug: string,
-  actorUserId: string,
-  targetUserId: string,
-) {
-  const { workspace, role: actorRole } = await resolveWorkspaceAndRole(
-    slug,
+export async function removeMember(slug: string, actorUserId: string, targetUserId: string) {
+  return sharedRemoveMember(
+    memberConfig,
+    resolveWorkspaceMember(slug, actorUserId),
     actorUserId,
-    'workspace:members:remove',
+    targetUserId,
   );
-
-  if (actorUserId === targetUserId) {
-    throw new ServiceError('BAD_REQUEST', 'Cannot remove yourself');
-  }
-
-  const [target] = await db
-    .select()
-    .from(workspaceMemberships)
-    .where(
-      and(
-        eq(workspaceMemberships.workspaceId, workspace.id),
-        eq(workspaceMemberships.userId, targetUserId),
-      ),
-    );
-
-  if (!target) throw new ServiceError('NOT_FOUND', 'Member not found');
-
-  // Manager cannot remove the owner (relational rule, not covered by permission matrix)
-  if (actorRole === 'manager' && target.role === 'owner') {
-    throw new ServiceError('BAD_REQUEST', 'Manager cannot remove the workspace owner');
-  }
-
-  await db.delete(workspaceMemberships).where(eq(workspaceMemberships.id, target.id));
 }
 
 /**
