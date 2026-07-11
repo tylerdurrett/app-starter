@@ -4,48 +4,51 @@ import { randomUUID } from 'node:crypto';
 import { slugify, ensureUniqueSlug } from './slug.js';
 import { can, type WorkspaceRole, type WorkspacePermission } from './permissions.js';
 
-import { ServiceError } from '../tenancy/index.js';
+import { ServiceError, resolveEntityAndRole } from '../tenancy/index.js';
 export { ServiceError };
 
 /**
  * Lookup workspace by slug, verify actor membership, and optionally check permission.
  * Returns NOT_FOUND for both missing workspaces and non-members (avoids leaking existence).
+ *
+ * Built on the shared role-resolution skeleton with a single resolver: direct
+ * workspace membership. Missing workspace (lookup) and non-member (no resolver
+ * match) both surface as NOT_FOUND.
  */
 export async function resolveWorkspaceAndRole(
   slug: string,
   actorUserId: string,
   requiredPermission?: WorkspacePermission,
 ): Promise<{ workspace: typeof workspaces.$inferSelect; role: WorkspaceRole }> {
-  const [row] = await db
-    .select({
-      id: workspaces.id,
-      name: workspaces.name,
-      slug: workspaces.slug,
-      createdByUserId: workspaces.createdByUserId,
-      createdAt: workspaces.createdAt,
-      updatedAt: workspaces.updatedAt,
-      role: workspaceMemberships.role,
-    })
-    .from(workspaces)
-    .innerJoin(
-      workspaceMemberships,
-      and(
-        eq(workspaceMemberships.workspaceId, workspaces.id),
-        eq(workspaceMemberships.userId, actorUserId),
-      ),
-    )
-    .where(eq(workspaces.slug, slug));
+  const { entity, role } = await resolveEntityAndRole<
+    typeof workspaces.$inferSelect,
+    WorkspaceRole,
+    WorkspacePermission
+  >({
+    lookup: async () => {
+      const [workspace] = await db.select().from(workspaces).where(eq(workspaces.slug, slug));
+      return workspace;
+    },
+    roleResolvers: [
+      async (workspace) => {
+        const [membership] = await db
+          .select({ role: workspaceMemberships.role })
+          .from(workspaceMemberships)
+          .where(
+            and(
+              eq(workspaceMemberships.workspaceId, workspace.id),
+              eq(workspaceMemberships.userId, actorUserId),
+            ),
+          );
+        return membership ? { role: membership.role as WorkspaceRole } : undefined;
+      },
+    ],
+    can,
+    requiredPermission,
+    notFoundMessage: 'Workspace not found',
+  });
 
-  if (!row) throw new ServiceError('NOT_FOUND', 'Workspace not found');
-
-  const role = row.role as WorkspaceRole;
-
-  if (requiredPermission && !can(role, requiredPermission)) {
-    throw new ServiceError('FORBIDDEN', `Missing permission: ${requiredPermission}`);
-  }
-
-  const { role: _role, ...workspace } = row;
-  return { workspace, role };
+  return { workspace: entity, role };
 }
 
 export async function createWorkspace({ name, ownerUserId }: { name: string; ownerUserId: string }) {
