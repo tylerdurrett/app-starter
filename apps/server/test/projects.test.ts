@@ -19,6 +19,34 @@ let carolId: string;
 const createdProjectIds: string[] = [];
 const createdWorkspaceIds: string[] = [];
 
+const canonicalProjectKeys = [
+  'id',
+  'name',
+  'slug',
+  'workspaceId',
+  'workspaceSlug',
+  'workspaceName',
+  'createdAt',
+  'updatedAt',
+  'role',
+].sort();
+
+function expectCanonicalProject(
+  project: Record<string, unknown>,
+  expected: {
+    id: string;
+    workspaceId: string;
+    workspaceSlug: string;
+    workspaceName: string;
+    role: 'owner' | 'manager' | 'member';
+  },
+) {
+  expect(project).toMatchObject(expected);
+  expect(Object.keys(project).sort()).toEqual(canonicalProjectKeys);
+  expect(typeof project.createdAt).toBe('string');
+  expect(typeof project.updatedAt).toBe('string');
+}
+
 /** Sign up a user and return their ID + session cookie. */
 async function signUp(email: string, name: string) {
   const res = await app.inject({
@@ -168,7 +196,11 @@ describe('POST /api/projects', () => {
 describe('GET /api/projects', () => {
   it('returns projects for the authenticated user', async () => {
     const { body: workspace } = await createWorkspace(aliceCookie, 'List Workspace');
-    await createProject(aliceCookie, workspace.slug, 'List Test Project');
+    const { body: project } = await createProject(
+      aliceCookie,
+      workspace.slug,
+      'List Test Project',
+    );
 
     const res = await app.inject({
       method: 'GET',
@@ -178,7 +210,46 @@ describe('GET /api/projects', () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(Array.isArray(body)).toBe(true);
-    expect(body.some((p: { name: string }) => p.name === 'List Test Project')).toBe(true);
+    const listed = body.find((candidate: { id: string }) => candidate.id === project.id);
+    expectCanonicalProject(listed, {
+      id: project.id,
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'owner',
+    });
+  });
+
+  it('includes direct-only projects user-wide and omits inaccessible siblings', async () => {
+    const { body: workspace } = await createWorkspace(aliceCookie, 'User Wide Direct Workspace');
+    const { body: project } = await createProject(
+      aliceCookie,
+      workspace.slug,
+      'User Wide Direct Project',
+    );
+    const { body: sibling } = await createProject(
+      aliceCookie,
+      workspace.slug,
+      'User Wide Inaccessible Sibling',
+    );
+    await addProjectMember(project.id, carolId, 'manager');
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/projects',
+      headers: { cookie: carolCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    const listed = body.find((candidate: { id: string }) => candidate.id === project.id);
+    expectCanonicalProject(listed, {
+      id: project.id,
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'manager',
+    });
+    expect(body.some((candidate: { id: string }) => candidate.id === sibling.id)).toBe(false);
   });
 
   it('lists and reads a workspace project for a member without direct project access', async () => {
@@ -253,7 +324,18 @@ describe('GET /api/projects/last-active', () => {
     });
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
-    expect(body.id).toBe(project.id);
+    expectCanonicalProject(body, {
+      id: project.id,
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'owner',
+    });
+  });
+
+  it('returns 401 when unauthenticated', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/projects/last-active' });
+    expect(res.statusCode).toBe(401);
   });
 });
 
@@ -269,8 +351,13 @@ describe('GET /api/projects/:projectSlug', () => {
     });
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
-    expect(body.id).toBe(project.id);
-    expect(body.role).toBe('owner');
+    expectCanonicalProject(body, {
+      id: project.id,
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'owner',
+    });
   });
 
   it('returns non-null workspaceSlug/workspaceName for a normal project', async () => {
@@ -303,8 +390,13 @@ describe('GET /api/projects/:projectSlug', () => {
     });
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
-    expect(body.id).toBe(project.id);
-    expect(body.role).toBe('owner'); // Synthetic owner role via override
+    expectCanonicalProject(body, {
+      id: project.id,
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'owner',
+    });
   });
 
   it('workspace manager can access project via admin override', async () => {
@@ -323,8 +415,13 @@ describe('GET /api/projects/:projectSlug', () => {
     });
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
-    expect(body.id).toBe(project.id);
-    expect(body.role).toBe('owner'); // Synthetic owner role via override
+    expectCanonicalProject(body, {
+      id: project.id,
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'owner',
+    });
   });
 
   it('workspace member without project membership gets synthetic member access', async () => {
@@ -342,9 +439,13 @@ describe('GET /api/projects/:projectSlug', () => {
       headers: { cookie: bobCookie },
     });
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toEqual(
-      expect.objectContaining({ id: project.id, role: 'member' }),
-    );
+    expectCanonicalProject(JSON.parse(res.body), {
+      id: project.id,
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'member',
+    });
   });
 
   it('user with project-scoped access but no workspace access can read project', async () => {
@@ -361,8 +462,38 @@ describe('GET /api/projects/:projectSlug', () => {
     });
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
-    expect(body.id).toBe(project.id);
-    expect(body.role).toBe('member');
+    expectCanonicalProject(body, {
+      id: project.id,
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'member',
+    });
+  });
+
+  it('gives a weaker direct role precedence over workspace-owner access', async () => {
+    const { body: workspace } = await createWorkspace(aliceCookie, 'Point Precedence Workspace');
+    await addWorkspaceMember(workspace.id, bobId, 'member');
+    const { body: project } = await createProject(
+      bobCookie,
+      workspace.slug,
+      'Point Precedence Project',
+    );
+    await addProjectMember(project.id, aliceId, 'member');
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expectCanonicalProject(JSON.parse(res.body), {
+      id: project.id,
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'member',
+    });
   });
 
   it('returns 404 for non-existent slug', async () => {

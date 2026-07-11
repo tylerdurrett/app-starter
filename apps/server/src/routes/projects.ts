@@ -3,8 +3,6 @@ import { config } from '../config.js';
 import { requireUser } from '../auth/require-permission.js';
 import {
   createProject,
-  listProjectsForUser,
-  getProjectBySlug,
   updateProject,
   deleteProject,
   listMembers,
@@ -13,6 +11,10 @@ import {
   getLastActiveProject,
   ServiceError,
 } from '../projects/service.js';
+import {
+  getAuthorizedProjectBySlug,
+  listAuthorizedProjectsForUser,
+} from '../projects/resolver.js';
 import { listInvites, createInvite, revokeInvite } from '../projects/invites.js';
 import { resolveWorkspaceAndRole } from '../workspaces/service.js';
 import { db, workspaces } from '@repo/db';
@@ -59,7 +61,7 @@ const projectRoutes: FastifyPluginAsync = async (app) => {
 
   app.get('/api/projects', async (request) => {
     const { user } = await requireUser(request);
-    return listProjectsForUser(user.id);
+    return listAuthorizedProjectsForUser(user.id);
   });
 
   // Register last-active BEFORE :projectSlug so Fastify doesn't treat "last-active" as a slug param
@@ -73,26 +75,10 @@ const projectRoutes: FastifyPluginAsync = async (app) => {
     async (request) => {
       const { user } = await requireUser(request);
       const { workspaceSlug, projectSlug } = request.params;
-      const { project, role } = await getProjectBySlug(projectSlug, user.id, workspaceSlug);
+      const project = await getAuthorizedProjectBySlug(workspaceSlug, projectSlug, user.id);
       // Fire-and-forget: failure to update last-active preference is non-critical
       setLastActiveProject(user.id, project.id).catch(() => {});
-      // Enrich with workspace slug/name so the client can render workspace context
-      // on project pages (needed by 4.1 switcher, including project-only access)
-      const [workspace] = await db
-        .select({ slug: workspaces.slug, name: workspaces.name })
-        .from(workspaces)
-        .where(eq(workspaces.id, project.workspaceId));
-      // The project's workspaceId FK guarantees this row exists; a missing row
-      // is an invariant violation, so fail loudly rather than emit null fields.
-      if (!workspace) {
-        throw new ServiceError('NOT_FOUND', 'Workspace not found for project');
-      }
-      return {
-        ...project,
-        role,
-        workspaceSlug: workspace.slug,
-        workspaceName: workspace.name,
-      };
+      return project;
     },
   );
 

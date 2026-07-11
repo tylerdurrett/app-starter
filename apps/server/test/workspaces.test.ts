@@ -3,7 +3,7 @@ import '../src/config.js';
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildServer } from '../src/index.js';
-import { db, workspaces, workspaceMemberships } from '@repo/db';
+import { db, projectMemberships, workspaces, workspaceMemberships } from '@repo/db';
 import { inArray } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 
@@ -14,6 +14,32 @@ let aliceId: string;
 let bobCookie: string;
 let bobId: string;
 const createdWorkspaceIds: string[] = [];
+
+const canonicalProjectKeys = [
+  'id',
+  'name',
+  'slug',
+  'workspaceId',
+  'workspaceSlug',
+  'workspaceName',
+  'createdAt',
+  'updatedAt',
+  'role',
+].sort();
+
+function expectCanonicalProject(
+  project: Record<string, unknown>,
+  expected: {
+    id: string;
+    workspaceId: string;
+    workspaceSlug: string;
+    workspaceName: string;
+    role: 'owner' | 'manager' | 'member';
+  },
+) {
+  expect(project).toMatchObject(expected);
+  expect(Object.keys(project).sort()).toEqual(canonicalProjectKeys);
+}
 
 /** Sign up a user and return their ID + session cookie. */
 async function signUp(email: string, name: string) {
@@ -41,11 +67,34 @@ async function createWs(cookie: string, name: string) {
   return { res, body };
 }
 
+async function createProject(cookie: string, workspaceSlug: string, name: string) {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/projects',
+    headers: { 'content-type': 'application/json', cookie },
+    payload: { workspaceSlug, name },
+  });
+  return { res, body: JSON.parse(res.body) };
+}
+
 /** Add a user as a member of a workspace directly in the DB. */
 async function addMember(workspaceId: string, userId: string, role: 'owner' | 'manager' | 'member' = 'member') {
   await db.insert(workspaceMemberships).values({
     id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     workspaceId,
+    userId,
+    role,
+  });
+}
+
+async function addProjectMember(
+  projectId: string,
+  userId: string,
+  role: 'owner' | 'manager' | 'member' = 'member',
+) {
+  await db.insert(projectMemberships).values({
+    id: `project-mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    projectId,
     userId,
     role,
   });
@@ -153,6 +202,112 @@ describe('GET /api/workspaces/:workspaceSlug', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/workspaces/anything',
+    });
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+describe('GET /api/workspaces/:workspaceSlug/projects', () => {
+  it.each(['owner', 'manager', 'member'] as const)(
+    'returns every canonical project for a workspace %s',
+    async (workspaceRole) => {
+      const { body: workspace } = await createWs(
+        aliceCookie,
+        `Filtered ${workspaceRole} Workspace`,
+      );
+      const actorCookie = workspaceRole === 'owner' ? aliceCookie : bobCookie;
+      if (workspaceRole !== 'owner') {
+        await addMember(workspace.id, bobId, workspaceRole);
+      }
+      const { body: projectA } = await createProject(
+        aliceCookie,
+        workspace.slug,
+        `Filtered ${workspaceRole} Project A`,
+      );
+      const { body: projectB } = await createProject(
+        aliceCookie,
+        workspace.slug,
+        `Filtered ${workspaceRole} Project B`,
+      );
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/workspaces/${workspace.slug}/projects`,
+        headers: { cookie: actorCookie },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      const expectedRole = workspaceRole === 'member' ? 'member' : 'owner';
+      for (const project of [projectA, projectB]) {
+        const listed = body.find((candidate: { id: string }) => candidate.id === project.id);
+        expectCanonicalProject(listed, {
+          id: project.id,
+          workspaceId: workspace.id,
+          workspaceSlug: workspace.slug,
+          workspaceName: workspace.name,
+          role: expectedRole,
+        });
+      }
+    },
+  );
+
+  it('allows direct-only filtered access without leaking siblings or other workspaces', async () => {
+    const { body: workspaceA } = await createWs(aliceCookie, 'Filtered Direct Workspace A');
+    const { body: workspaceB } = await createWs(aliceCookie, 'Filtered Direct Workspace B');
+    const { body: projectA } = await createProject(
+      aliceCookie,
+      workspaceA.slug,
+      'Filtered Direct Project A',
+    );
+    const { body: siblingA } = await createProject(
+      aliceCookie,
+      workspaceA.slug,
+      'Filtered Direct Sibling A',
+    );
+    const { body: projectB } = await createProject(
+      aliceCookie,
+      workspaceB.slug,
+      'Filtered Direct Project B',
+    );
+    await addProjectMember(projectA.id, bobId, 'manager');
+    await addProjectMember(projectB.id, bobId, 'member');
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspaceA.slug}/projects`,
+      headers: { cookie: bobCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.map((project: { id: string }) => project.id)).toEqual([projectA.id]);
+    expect(body.map((project: { id: string }) => project.id)).not.toContain(siblingA.id);
+    expect(body.map((project: { id: string }) => project.id)).not.toContain(projectB.id);
+    expectCanonicalProject(body[0], {
+      id: projectA.id,
+      workspaceId: workspaceA.id,
+      workspaceSlug: workspaceA.slug,
+      workspaceName: workspaceA.name,
+      role: 'manager',
+    });
+  });
+
+  it('returns an empty list rather than revealing an inaccessible workspace', async () => {
+    const { body: workspace } = await createWs(aliceCookie, 'Filtered Private Workspace');
+    await createProject(aliceCookie, workspace.slug, 'Filtered Private Project');
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspace.slug}/projects`,
+      headers: { cookie: bobCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual([]);
+  });
+
+  it('returns 401 when unauthenticated', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/workspaces/anything/projects',
     });
     expect(res.statusCode).toBe(401);
   });
