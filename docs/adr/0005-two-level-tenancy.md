@@ -30,8 +30,11 @@ Two access rules are deliberate invariants:
   a read-only synthetic project `member` role. Neither path creates a
   project membership record, and direct project membership takes
   precedence.
-- **404, never 403**: a user without access to an existing project gets
-  `NOT_FOUND`. Non-members must not learn the project exists.
+- **Non-disclosing access failure**: a user without access to an existing
+  project gets `NOT_FOUND` from single-project resolution. List reads omit
+  inaccessible projects, and last-active restoration returns no project when
+  its reference is missing or inaccessible. None reveal existence with a
+  distinct `FORBIDDEN` response.
 
 ## Known debt (deliberately NOT an invariant)
 

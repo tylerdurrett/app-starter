@@ -12,15 +12,12 @@ import {
   projectInvites,
   users,
 } from '@repo/db';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 
 import { createWorkspace } from '../src/workspaces/service.js';
 import {
   createProject,
-  listAccessibleProjectsForUser,
-  listProjectsForUser,
-  getProjectBySlug,
   updateProject,
   deleteProject,
   listMembers,
@@ -167,175 +164,6 @@ describe('createProject', () => {
   it('handles special-character names with a fallback slug', async () => {
     const proj = await createAndTrack('!@#$%', aliceId);
     expect(proj.slug).toMatch(/^project-/);
-  });
-});
-
-describe('listProjectsForUser', () => {
-  it('includes workspace-visible projects with the existing response shape', async () => {
-    const workspace = await createAndTrackWorkspace('User Project List Workspace', aliceId);
-    await addWorkspaceMember(workspace.id, bobId, 'member');
-    const project = await createAndTrack('Workspace Visible User Project', aliceId, {
-      wsId: workspace.id,
-    });
-
-    const bobList = await listProjectsForUser(bobId);
-    const listedProject = bobList.find(({ id }) => id === project.id);
-
-    expect(listedProject).toEqual({
-      id: project.id,
-      name: project.name,
-      slug: project.slug,
-      workspaceId: workspace.id,
-      workspaceName: workspace.name,
-      workspaceSlug: workspace.slug,
-      createdAt: project.createdAt,
-      updatedAt: project.updatedAt,
-      role: 'member',
-    });
-  });
-
-  it('orders workspace-visible projects by project creation time', async () => {
-    const firstWorkspace = await createAndTrackWorkspace('First Ordered Workspace', aliceId);
-    const secondWorkspace = await createAndTrackWorkspace('Second Ordered Workspace', aliceId);
-    await addWorkspaceMember(firstWorkspace.id, bobId, 'member');
-    await addWorkspaceMember(secondWorkspace.id, bobId, 'member');
-
-    const olderProject = await createAndTrack('Older Ordered Project', aliceId, {
-      wsId: secondWorkspace.id,
-    });
-    const newerProject = await createAndTrack('Newer Ordered Project', aliceId, {
-      wsId: firstWorkspace.id,
-    });
-    await db
-      .update(projects)
-      .set({ createdAt: new Date('2000-01-01T00:00:00.000Z') })
-      .where(eq(projects.id, olderProject.id));
-    await db
-      .update(projects)
-      .set({ createdAt: new Date('2001-01-01T00:00:00.000Z') })
-      .where(eq(projects.id, newerProject.id));
-
-    const bobList = await listProjectsForUser(bobId);
-
-    expect(bobList.slice(0, 2).map(({ id }) => id)).toEqual([olderProject.id, newerProject.id]);
-  });
-});
-
-describe('listAccessibleProjectsForUser', () => {
-  it('returns direct project memberships with workspace context', async () => {
-    const workspace = await createAndTrackWorkspace('Direct Access Workspace', aliceId);
-    const project = await createAndTrack('Direct Access Project', aliceId, {
-      wsId: workspace.id,
-    });
-    await addProjectMember(project.id, bobId, 'member');
-
-    const result = await listAccessibleProjectsForUser(bobId);
-
-    expect(result).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: project.id,
-          role: 'member',
-          access: 'project_membership',
-          workspace: expect.objectContaining({
-            id: workspace.id,
-            name: workspace.name,
-            slug: workspace.slug,
-          }),
-        }),
-      ]),
-    );
-  });
-
-  it.each([
-    ['owner', 'owner', 'workspace_admin'],
-    ['manager', 'owner', 'workspace_admin'],
-    ['member', 'member', 'workspace_member'],
-  ] as const)(
-    'includes projects visible to a workspace %s with role %s and access %s',
-    async (workspaceRole, projectRole, access) => {
-      const workspace = await createAndTrackWorkspace(
-        `Workspace ${workspaceRole} List`,
-        workspaceRole === 'owner' ? bobId : aliceId,
-      );
-      if (workspaceRole !== 'owner') {
-        await addWorkspaceMember(workspace.id, bobId, workspaceRole);
-      }
-      const project = await createAndTrack(`${workspaceRole} Visible Project`, aliceId, {
-        wsId: workspace.id,
-      });
-
-      const result = await listAccessibleProjectsForUser(bobId, {
-        workspaceSlug: workspace.slug,
-      });
-
-      expect(result).toEqual([
-        expect.objectContaining({
-          id: project.id,
-          role: projectRole,
-          access,
-          workspace: expect.objectContaining({ slug: workspace.slug }),
-        }),
-      ]);
-    },
-  );
-
-  it('keeps direct project role when workspace admin access also applies', async () => {
-    const workspace = await createAndTrackWorkspace('Direct Role Wins Workspace', aliceId);
-    await addWorkspaceMember(workspace.id, bobId, 'manager');
-    const project = await createAndTrack('Direct Role Wins Project', aliceId, {
-      wsId: workspace.id,
-    });
-    await addProjectMember(project.id, bobId, 'member');
-
-    const result = await listAccessibleProjectsForUser(bobId, { workspaceSlug: workspace.slug });
-
-    expect(result).toEqual([
-      expect.objectContaining({
-        id: project.id,
-        role: 'member',
-        access: 'project_membership',
-      }),
-    ]);
-  });
-
-  it('filters direct project access by workspace slug even without workspace membership', async () => {
-    const workspace = await createAndTrackWorkspace('Project Scoped Filter Workspace', aliceId);
-    const project = await createAndTrack('Project Scoped Filter Project', aliceId, {
-      wsId: workspace.id,
-    });
-    await addProjectMember(project.id, bobId, 'member');
-
-    const matching = await listAccessibleProjectsForUser(bobId, { workspaceSlug: workspace.slug });
-    const missing = await listAccessibleProjectsForUser(bobId, {
-      workspaceSlug: 'no-such-workspace',
-    });
-
-    expect(matching.map((p) => p.id)).toContain(project.id);
-    expect(missing).toEqual([]);
-  });
-});
-
-describe('getProjectBySlug', () => {
-  it('returns project and role for a direct member', async () => {
-    const proj = await createAndTrack('Get Proj', aliceId);
-    const result = await getProjectBySlug(proj.slug, aliceId, workspaceSlug);
-
-    expect(result.project.id).toBe(proj.id);
-    expect(result.role).toBe('owner');
-  });
-
-  it('throws NOT_FOUND for non-existent slug', async () => {
-    await expect(getProjectBySlug('no-such-proj', aliceId, workspaceSlug)).rejects.toMatchObject({
-      code: 'NOT_FOUND',
-    });
-  });
-
-  it('throws NOT_FOUND for user with neither project nor workspace access', async () => {
-    const proj = await createAndTrack('No Bob Proj', aliceId);
-    await expect(getProjectBySlug(proj.slug, bobId, workspaceSlug)).rejects.toMatchObject({
-      code: 'NOT_FOUND',
-    });
   });
 });
 
@@ -486,30 +314,6 @@ describe('removeMember', () => {
 });
 
 describe('workspace-scoped slug threading through service wrappers', () => {
-  it('getProjectBySlug resolves each duplicate-slug project under its own workspace', async () => {
-    const wsA = await createAndTrackWorkspace('Svc Composite Ws A', aliceId);
-    const wsB = await createAndTrackWorkspace('Svc Composite Ws B', aliceId);
-    const projA = await createAndTrack('Svc Shared Slug', aliceId, { wsId: wsA.id });
-    const projB = await createAndTrack('Svc Shared Slug', aliceId, { wsId: wsB.id });
-    expect(projA.slug).toBe(projB.slug);
-
-    const resA = await getProjectBySlug(projA.slug, aliceId, wsA.slug);
-    const resB = await getProjectBySlug(projB.slug, aliceId, wsB.slug);
-
-    expect(resA.project.id).toBe(projA.id);
-    expect(resB.project.id).toBe(projB.id);
-  });
-
-  it('getProjectBySlug returns NOT_FOUND when the slug lives only in another workspace', async () => {
-    const wsA = await createAndTrackWorkspace('Svc Wrong Ws A', aliceId);
-    const wsB = await createAndTrackWorkspace('Svc Wrong Ws B', aliceId);
-    const proj = await createAndTrack('Svc Only In A', aliceId, { wsId: wsA.id });
-
-    await expect(getProjectBySlug(proj.slug, aliceId, wsB.slug)).rejects.toMatchObject({
-      code: 'NOT_FOUND',
-    });
-  });
-
   it('updateProject targets the project in the given workspace', async () => {
     const wsA = await createAndTrackWorkspace('Svc Update Ws A', aliceId);
     const wsB = await createAndTrackWorkspace('Svc Update Ws B', aliceId);
@@ -570,6 +374,15 @@ describe('workspace-scoped slug threading through service wrappers', () => {
 });
 
 describe('last active project', () => {
+  it('returns null when the user has no last-active project', async () => {
+    await db
+      .update(users)
+      .set({ lastActiveProjectId: null })
+      .where(eq(users.id, bobId));
+
+    await expect(getLastActiveProject(bobId)).resolves.toBeNull();
+  });
+
   it('setLastActiveProject updates the user row', async () => {
     const proj = await createAndTrack('Last Active Set', aliceId);
     await setLastActiveProject(aliceId, proj.id);
@@ -587,8 +400,71 @@ describe('last active project', () => {
     await setLastActiveProject(aliceId, proj.id);
 
     const result = await getLastActiveProject(aliceId);
-    expect(result).not.toBeNull();
-    expect(result!.id).toBe(proj.id);
+    expect(result).toEqual({
+      id: proj.id,
+      name: proj.name,
+      slug: proj.slug,
+      workspaceId,
+      workspaceSlug,
+      workspaceName: 'Projects Test Parent',
+      createdAt: proj.createdAt,
+      updatedAt: proj.updatedAt,
+      role: 'owner',
+    });
+  });
+
+  it('returns null without throwing when the stored project is inaccessible', async () => {
+    const workspace = await createAndTrackWorkspace('Last Active Inaccessible Workspace', aliceId);
+    const proj = await createAndTrack('Last Active Inaccessible Project', aliceId, {
+      wsId: workspace.id,
+    });
+    await setLastActiveProject(bobId, proj.id);
+
+    await expect(getLastActiveProject(bobId)).resolves.toBeNull();
+  });
+
+  it('uses workspace-derived access for the stored project', async () => {
+    const workspace = await createAndTrackWorkspace('Last Active Workspace Access', aliceId);
+    const proj = await createAndTrack('Last Active Workspace Project', aliceId, {
+      wsId: workspace.id,
+    });
+    await addWorkspaceMember(workspace.id, bobId, 'manager');
+    await setLastActiveProject(bobId, proj.id);
+
+    await expect(getLastActiveProject(bobId)).resolves.toMatchObject({
+      id: proj.id,
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'owner',
+    });
+  });
+
+  it('falls back to workspace access after direct access loss, then returns null', async () => {
+    const workspace = await createAndTrackWorkspace('Last Active Access Loss Workspace', aliceId);
+    const proj = await createAndTrack('Last Active Access Loss Project', aliceId, {
+      wsId: workspace.id,
+    });
+    await addWorkspaceMember(workspace.id, bobId, 'member');
+    await addProjectMember(proj.id, bobId, 'manager');
+    await setLastActiveProject(bobId, proj.id);
+
+    await db
+      .delete(projectMemberships)
+      .where(
+        and(eq(projectMemberships.projectId, proj.id), eq(projectMemberships.userId, bobId)),
+      );
+    await expect(getLastActiveProject(bobId)).resolves.toMatchObject({
+      id: proj.id,
+      role: 'member',
+    });
+
+    await db
+      .delete(workspaceMemberships)
+      .where(
+        and(eq(workspaceMemberships.workspaceId, workspace.id), eq(workspaceMemberships.userId, bobId)),
+      );
+    await expect(getLastActiveProject(bobId)).resolves.toBeNull();
   });
 
   it('returns null after the referenced project is deleted (FK SET NULL)', async () => {

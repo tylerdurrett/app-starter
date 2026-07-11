@@ -1,11 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+// Ensure .env is loaded before MCP tool imports reach @repo/db
+import '../src/config.js';
 
-vi.mock('../src/workspaces/service.js', () => ({
-  listWorkspacesForUser: vi.fn(),
-}));
-vi.mock('../src/projects/service.js', () => ({
-  listAccessibleProjectsForUser: vi.fn(),
-}));
+import { describe, it, expect } from 'vitest';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';

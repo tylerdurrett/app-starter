@@ -1,4 +1,4 @@
-import { db, workspaces, workspaceMemberships, projects, projectMemberships } from '@repo/db';
+import { db, workspaces, workspaceMemberships } from '@repo/db';
 import { eq, and, asc } from 'drizzle-orm';
 import { ensureUniqueSlug } from './slug.js';
 import { can, type WorkspaceRole, type WorkspacePermission } from './permissions.js';
@@ -160,52 +160,5 @@ export async function removeMember(slug: string, actorUserId: string, targetUser
     actorUserId,
     targetUserId,
   );
-}
-
-/**
- * List projects in a workspace, filtered by visibility.
- * - Workspace admin (owner/manager) sees all projects
- * - Workspace member sees only projects they belong to
- */
-export async function listProjectsForWorkspace(slug: string, actorUserId: string) {
-  const { workspace, role } = await resolveWorkspaceAndRole(slug, actorUserId);
-
-  // Workspace owner or manager sees all projects
-  if (role === 'owner' || role === 'manager') {
-    return db
-      .select({
-        id: projects.id,
-        name: projects.name,
-        slug: projects.slug,
-        workspaceId: projects.workspaceId,
-        createdAt: projects.createdAt,
-        updatedAt: projects.updatedAt,
-      })
-      .from(projects)
-      .where(eq(projects.workspaceId, workspace.id))
-      .orderBy(asc(projects.createdAt));
-  }
-
-  // Workspace member sees only projects they have explicit access to
-  return db
-    .select({
-      id: projects.id,
-      name: projects.name,
-      slug: projects.slug,
-      workspaceId: projects.workspaceId,
-      createdAt: projects.createdAt,
-      updatedAt: projects.updatedAt,
-      role: projectMemberships.role,
-    })
-    .from(projects)
-    .innerJoin(
-      projectMemberships,
-      and(
-        eq(projectMemberships.projectId, projects.id),
-        eq(projectMemberships.userId, actorUserId)
-      )
-    )
-    .where(eq(projects.workspaceId, workspace.id))
-    .orderBy(asc(projects.createdAt));
 }
 

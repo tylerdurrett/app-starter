@@ -10,9 +10,9 @@ import {
   deleteWorkspace,
   listMembers,
   removeMember,
-  listProjectsForWorkspace,
 } from '../workspaces/service.js';
 import { listInvites, createInvite, revokeInvite, toWorkspaceInvite } from '../workspaces/invites.js';
+import { listAuthorizedProjectsForUser } from '../projects/resolver.js';
 
 interface WorkspaceSlugParams {
   workspaceSlug: string;
@@ -130,7 +130,7 @@ const workspaceRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Params: WorkspaceSlugParams }>('/api/workspaces/:workspaceSlug/projects', async (request) => {
     const { user } = await requireUser(request);
     const { workspaceSlug } = request.params;
-    return listProjectsForWorkspace(workspaceSlug, user.id);
+    return listAuthorizedProjectsForUser(user.id, { workspaceSlug });
   });
 };
 
