@@ -31,8 +31,14 @@ export interface CreateWithOwnerConfig {
  * Insert an entity and its owner membership in one transaction, computing a
  * unique slug (with an empty-slug fallback) first. The project level wraps this
  * in its slug-unique-violation retry; the workspace level calls it directly.
+ *
+ * `Entity` is the level's row type (`typeof workspaces.$inferSelect` etc.); the
+ * config table is a generic `PgTable`, so the caller names the concrete row
+ * type the inserted-and-returned record is cast to.
  */
-export async function createWithOwnerMembership(config: CreateWithOwnerConfig) {
+export async function createWithOwnerMembership<Entity>(
+  config: CreateWithOwnerConfig,
+): Promise<Entity> {
   let baseSlug = slugify(config.name);
   // Fallback for names that produce an empty slug (e.g. all special chars)
   if (!baseSlug) baseSlug = `${config.slugFallbackPrefix}-${randomUUID().slice(0, 8)}`;
@@ -63,5 +69,5 @@ export async function createWithOwnerMembership(config: CreateWithOwnerConfig) {
   if (!created) {
     throw new Error('createWithOwnerMembership: insert returned no rows');
   }
-  return created;
+  return created as Entity;
 }
