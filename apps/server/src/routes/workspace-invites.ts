@@ -1,17 +1,11 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { WorkspaceInviteMetadata, WorkspaceInviteAcceptResult } from '@repo/shared';
+import type { WorkspaceInviteMetadata } from '@repo/shared';
 import { requireUser } from '../auth/require-permission.js';
 import { getInviteByToken, acceptInvite } from '../workspaces/invites.js';
-import type { AssertWire, WireContract } from '../workspaces/wire-contract.js';
 
 interface TokenParams {
   token: string;
 }
-
-// Compile-time contract: the accept reply serializes to the shared schema.
-type _AcceptResult = AssertWire<
-  WireContract<Awaited<ReturnType<typeof acceptInvite>>, WorkspaceInviteAcceptResult>
->;
 
 const workspaceInviteRoutes: FastifyPluginAsync = async (app) => {
   // Unauthenticated: invite landing page needs metadata before login

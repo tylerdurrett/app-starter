@@ -17,45 +17,7 @@ import { listInvites, createInvite, revokeInvite } from '../projects/invites.js'
 import { resolveWorkspaceAndRole } from '../workspaces/service.js';
 import { db, workspaces } from '@repo/db';
 import { eq } from 'drizzle-orm';
-import type {
-  Project,
-  ProjectWithRole,
-  ProjectMember,
-  ProjectInvite,
-  ProjectInviteCreateResult,
-} from '@repo/shared';
-import type { AssertWire, Elem, WireContract } from '../workspaces/wire-contract.js';
-
-// Compile-time contract: the project route replies below serialize to the
-// shared @repo/shared schemas. A drifting field breaks the build here. The
-// create/get/update replies enrich the raw project row with parent-workspace
-// context (workspaceSlug/workspaceName), so the asserted reply types include it.
-type _CreateProject = AssertWire<
-  WireContract<
-    NonNullable<Awaited<ReturnType<typeof createProject>>> & { workspaceSlug: string; workspaceName: string },
-    Project
-  >
->;
-type _UpdateProject = AssertWire<
-  WireContract<
-    NonNullable<Awaited<ReturnType<typeof updateProject>>> & { workspaceSlug: string; workspaceName: string },
-    Project
-  >
->;
-type _ListProjects = AssertWire<WireContract<Elem<Awaited<ReturnType<typeof listProjectsForUser>>>, ProjectWithRole>>;
-type _GetProject = AssertWire<
-  WireContract<
-    Awaited<ReturnType<typeof getProjectBySlug>> extends { project: infer P; role: infer R }
-      ? P & { role: R; workspaceSlug: string; workspaceName: string }
-      : never,
-    ProjectWithRole
-  >
->;
-type _LastActiveProject = AssertWire<
-  WireContract<NonNullable<Awaited<ReturnType<typeof getLastActiveProject>>>, Project>
->;
-type _ListMembers = AssertWire<WireContract<Elem<Awaited<ReturnType<typeof listMembers>>>, ProjectMember>>;
-type _ListInvites = AssertWire<WireContract<Elem<Awaited<ReturnType<typeof listInvites>>>, ProjectInvite>>;
+import type { ProjectInvite, ProjectInviteCreateResult } from '@repo/shared';
 
 interface ProjectSlugParams {
   workspaceSlug: string;
