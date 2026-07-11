@@ -137,4 +137,40 @@ describe('apiFetchParsed boundary', () => {
     const { getLastActiveProject } = await loadLibReturning(null);
     await expect(getLastActiveProject()).resolves.toBeNull();
   });
+
+  // Guard the request URL each resource function builds — a mistyped route
+  // template in projects.ts (wrong path, missing segment) must fail here even
+  // though the response body still parses. apiFetch prefixes SERVER_URL, so the
+  // captured argument is the full `http://test.local` + path string.
+  it('GETs the correct project route template', async () => {
+    const { getProject } = await loadLibReturning({ ...validProject, role: 'owner' });
+    await getProject('acme', 'apollo');
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme/projects/apollo');
+  });
+
+  it('PATCHes the correct project route template on update', async () => {
+    const { updateProject } = await loadLibReturning(validProject);
+    await updateProject('acme', 'apollo', { name: 'Renamed' });
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme/projects/apollo');
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]?.method).toBe('PATCH');
+  });
+
+  it('DELETEs the correct project route template', async () => {
+    const { deleteProject } = await loadLibReturning(null);
+    await deleteProject('acme', 'apollo', 'apollo');
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme/projects/apollo');
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]?.method).toBe('DELETE');
+  });
+
+  it('lists members from the correct project route template', async () => {
+    const { listProjectMembers } = await loadLibReturning([validMember]);
+    await listProjectMembers('acme', 'apollo');
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme/projects/apollo/members');
+  });
+
+  it('lists invites from the correct project route template', async () => {
+    const { listProjectInvites } = await loadLibReturning([validInvite]);
+    await listProjectInvites('acme', 'apollo');
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://test.local/api/workspaces/acme/projects/apollo/invites');
+  });
 });
