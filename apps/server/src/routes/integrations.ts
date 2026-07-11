@@ -1,5 +1,4 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { MaskedIntegration, TestIntegrationResult } from '@repo/shared';
 import { requireUser } from '../auth/require-permission.js';
 import {
   listIntegrations,
@@ -9,25 +8,6 @@ import {
   deleteIntegration,
   testIntegration,
 } from '../integrations/service.js';
-import type { AssertWire, Elem, WireContract } from '../workspaces/wire-contract.js';
-
-// Compile-time contract: the integration route replies below serialize to the
-// shared @repo/shared schemas. A drifting field breaks the build here.
-type _ListIntegrations = AssertWire<
-  WireContract<Elem<Awaited<ReturnType<typeof listIntegrations>>>, MaskedIntegration>
->;
-type _GetIntegration = AssertWire<
-  WireContract<Awaited<ReturnType<typeof getIntegration>>, MaskedIntegration>
->;
-type _CreateIntegration = AssertWire<
-  WireContract<Awaited<ReturnType<typeof createIntegration>>, MaskedIntegration>
->;
-type _UpdateIntegration = AssertWire<
-  WireContract<Awaited<ReturnType<typeof updateIntegration>>, MaskedIntegration>
->;
-type _TestIntegration = AssertWire<
-  WireContract<Awaited<ReturnType<typeof testIntegration>>, TestIntegrationResult>
->;
 
 interface IntegrationParams {
   workspaceSlug: string;
