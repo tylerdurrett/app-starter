@@ -1,16 +1,17 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+// Ensure .env is loaded before @repo/db reads DATABASE_URL
+import '../src/config.js';
 
-vi.mock('../src/projects/resolver.js', () => ({
-  listAuthorizedProjectsForUser: vi.fn(),
-}));
-
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { listAuthorizedProjectsForUser } from '../src/projects/resolver.js';
+import { db, projectMemberships, workspaces, workspaceMemberships } from '@repo/db';
+import { eq } from 'drizzle-orm';
+import type { FastifyInstance } from 'fastify';
+import { buildServer } from '../src/index.js';
+import { createProject } from '../src/projects/service.js';
+import { createWorkspace } from '../src/workspaces/service.js';
 import { registerListProjectsTool } from '../src/mcp/tools/list-projects.js';
-
-const mockedListProjects = vi.mocked(listAuthorizedProjectsForUser);
 
 interface ProjectToolContent {
   projects: Array<Record<string, unknown>>;
@@ -22,32 +23,69 @@ interface ProjectToolContent {
   }>;
 }
 
-const createdAt = new Date('2025-01-01T00:00:00.000Z');
-const updatedAt = new Date('2025-01-02T00:00:00.000Z');
+const canonicalProjectKeys = [
+  'createdAt',
+  'id',
+  'name',
+  'role',
+  'slug',
+  'updatedAt',
+  'workspaceId',
+  'workspaceName',
+  'workspaceSlug',
+].sort();
 
-const roadmapProject = {
-  id: 'project-1',
-  name: 'Roadmap',
-  slug: 'roadmap',
-  workspaceId: 'workspace-1',
-  workspaceSlug: 'acme-co',
-  workspaceName: 'Acme Co',
-  createdAt,
-  updatedAt,
-  role: 'owner' as const,
-};
+let app: FastifyInstance;
 
-const supportProject = {
-  id: 'project-2',
-  name: 'Support',
-  slug: 'support',
-  workspaceId: 'workspace-2',
-  workspaceSlug: 'support-co',
-  workspaceName: 'Support Co',
-  createdAt,
-  updatedAt,
-  role: 'member' as const,
-};
+async function signUpWithoutPersonalWorkspace(label: string): Promise<string> {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/auth/sign-up/email',
+    headers: { 'content-type': 'application/json' },
+    payload: {
+      email: `mcp-projects-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@test.com`,
+      password: 'password123',
+      name: `MCP ${label}`,
+    },
+  });
+  const userId = JSON.parse(res.body).user.id as string;
+  await db.delete(workspaces).where(eq(workspaces.createdByUserId, userId));
+  return userId;
+}
+
+async function createWs(name: string, ownerUserId: string) {
+  return createWorkspace({ name, ownerUserId });
+}
+
+async function createProj(name: string, workspaceId: string, ownerUserId: string) {
+  return (await createProject({ name, workspaceId, ownerUserId }))!;
+}
+
+async function addWorkspaceMember(
+  workspaceId: string,
+  userId: string,
+  role: 'owner' | 'manager' | 'member',
+) {
+  await db.insert(workspaceMemberships).values({
+    id: `mcp-wm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    workspaceId,
+    userId,
+    role,
+  });
+}
+
+async function addProjectMember(
+  projectId: string,
+  userId: string,
+  role: 'owner' | 'manager' | 'member',
+) {
+  await db.insert(projectMemberships).values({
+    id: `mcp-pm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    projectId,
+    userId,
+    role,
+  });
+}
 
 async function createTestClient(authCtx: { userId: string; scopes: string[] }) {
   const server = new McpServer({ name: 'test', version: '0.0.1' }, { capabilities: { tools: {} } });
@@ -55,12 +93,10 @@ async function createTestClient(authCtx: { userId: string; scopes: string[] }) {
 
   const client = new Client({ name: 'test-client', version: '0.0.1' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
   return {
     client,
-    server,
     cleanup: async () => {
       await client.close();
       await server.close();
@@ -68,135 +104,115 @@ async function createTestClient(authCtx: { userId: string; scopes: string[] }) {
   };
 }
 
+beforeAll(async () => {
+  app = buildServer();
+  await app.ready();
+});
+
+afterAll(async () => {
+  await app.close();
+});
+
 describe('registerListProjectsTool', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('returns grouped empty results when user has no accessible projects', async () => {
-    mockedListProjects.mockResolvedValueOnce([]);
-
-    const { client, cleanup } = await createTestClient({
-      userId: 'user-no-projects',
-      scopes: ['projects:read'],
-    });
-
-    const result = await client.callTool({ name: 'list_projects', arguments: {} });
-
-    expect(mockedListProjects).toHaveBeenCalledWith('user-no-projects');
-    expect(result.structuredContent).toEqual({ projects: [], workspaces: [] });
-    expect(result.content).toEqual([{ type: 'text', text: 'No accessible projects found.' }]);
-
-    await cleanup();
-  });
-
-  it('returns flat canonical projects grouped across workspaces with a human summary', async () => {
-    mockedListProjects.mockResolvedValueOnce([roadmapProject, supportProject]);
+  it('returns canonical real-DB projects and preserves effective-role precedence', async () => {
+    const actorId = await signUpWithoutPersonalWorkspace('real-db-actor');
+    const ownerId = await signUpWithoutPersonalWorkspace('real-db-owner');
+    const workspace = await createWs('MCP Real DB Workspace', ownerId);
+    const directProject = await createProj('MCP Direct Project', workspace.id, ownerId);
+    const inheritedProject = await createProj('MCP Inherited Project', workspace.id, ownerId);
+    await addWorkspaceMember(workspace.id, actorId, 'manager');
+    await addProjectMember(directProject.id, actorId, 'member');
 
     const { client, cleanup } = await createTestClient({
-      userId: 'user-projects',
+      userId: actorId,
       scopes: ['openid', 'projects:read'],
     });
-
     const result = await client.callTool({ name: 'list_projects', arguments: {} });
-    const structuredContent = result.structuredContent as ProjectToolContent;
+    const structured = result.structuredContent as unknown as ProjectToolContent;
 
-    expect(structuredContent.projects).toEqual([roadmapProject, supportProject]);
-    expect(structuredContent.workspaces).toEqual([
-      {
-        id: 'workspace-1',
-        name: 'Acme Co',
-        slug: 'acme-co',
-        projects: [roadmapProject],
-      },
-      {
-        id: 'workspace-2',
-        name: 'Support Co',
-        slug: 'support-co',
-        projects: [supportProject],
-      },
+    const direct = structured.projects.find((project) => project.id === directProject.id)!;
+    const inherited = structured.projects.find((project) => project.id === inheritedProject.id)!;
+    expect(direct).toMatchObject({
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'member',
+    });
+    expect(inherited).toMatchObject({
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+      role: 'owner',
+    });
+    expect(Object.keys(direct).sort()).toEqual(canonicalProjectKeys);
+    expect(Object.keys(inherited).sort()).toEqual(canonicalProjectKeys);
+    expect(structured.workspaces).toEqual([
+      expect.objectContaining({
+        id: workspace.id,
+        name: workspace.name,
+        slug: workspace.slug,
+        projects: expect.arrayContaining([
+          expect.objectContaining({ id: directProject.id }),
+          expect.objectContaining({ id: inheritedProject.id }),
+        ]),
+      }),
     ]);
-    expect(result.content).toEqual([
-      {
-        type: 'text',
-        text: "Found 2 projects across 2 workspaces: 'Roadmap' (Acme Co, owner), 'Support' (Support Co, member)",
-      },
-    ]);
-
-    for (const project of [
-      ...structuredContent.projects,
-      ...structuredContent.workspaces.flatMap((workspace) => workspace.projects),
-    ]) {
-      expect(Object.keys(project).sort()).toEqual(
-        [
-          'createdAt',
-          'id',
-          'name',
-          'role',
-          'slug',
-          'updatedAt',
-          'workspaceId',
-          'workspaceName',
-          'workspaceSlug',
-        ].sort(),
-      );
-      expect(project).not.toHaveProperty('access');
-      expect(project).not.toHaveProperty('workspace');
-    }
+    expect((result.content as Array<{ text: string }>)[0].text).toContain(
+      `'${directProject.name}' (${workspace.name}, member)`,
+    );
 
     await cleanup();
   });
 
-  it('passes optional workspaceSlug to the project resolver', async () => {
-    mockedListProjects.mockResolvedValueOnce([]);
+  it('filters direct-only access by workspace without leaking siblings', async () => {
+    const actorId = await signUpWithoutPersonalWorkspace('filtered-actor');
+    const ownerId = await signUpWithoutPersonalWorkspace('filtered-owner');
+    const workspaceA = await createWs('MCP Filter Workspace A', ownerId);
+    const workspaceB = await createWs('MCP Filter Workspace B', ownerId);
+    const projectA = await createProj('MCP Filter Project A', workspaceA.id, ownerId);
+    const siblingA = await createProj('MCP Filter Sibling A', workspaceA.id, ownerId);
+    const projectB = await createProj('MCP Filter Project B', workspaceB.id, ownerId);
+    await addProjectMember(projectA.id, actorId, 'manager');
+    await addProjectMember(projectB.id, actorId, 'member');
 
     const { client, cleanup } = await createTestClient({
-      userId: 'user-filtered',
+      userId: actorId,
       scopes: ['projects:read'],
     });
-
     const result = await client.callTool({
       name: 'list_projects',
-      arguments: { workspaceSlug: 'acme-co' },
+      arguments: { workspaceSlug: workspaceA.slug },
     });
+    const structured = result.structuredContent as unknown as ProjectToolContent;
 
-    expect(mockedListProjects).toHaveBeenCalledWith('user-filtered', {
-      workspaceSlug: 'acme-co',
+    expect(structured.projects.map((project) => project.id)).toEqual([projectA.id]);
+    expect(structured.projects.map((project) => project.id)).not.toContain(siblingA.id);
+    expect(structured.projects.map((project) => project.id)).not.toContain(projectB.id);
+    expect(structured.projects[0]).toMatchObject({
+      workspaceSlug: workspaceA.slug,
+      role: 'manager',
     });
-    expect(result.content).toEqual([
-      { type: 'text', text: "No accessible projects found in workspace 'acme-co'." },
-    ]);
 
     await cleanup();
   });
 
-  it('displays the resolver-provided effective role without recalculating it', async () => {
-    mockedListProjects.mockResolvedValueOnce([{ ...roadmapProject, role: 'member' }]);
-
+  it('returns grouped empty results when the actor has no accessible projects', async () => {
+    const actorId = await signUpWithoutPersonalWorkspace('empty-actor');
     const { client, cleanup } = await createTestClient({
-      userId: 'user-effective-role',
+      userId: actorId,
       scopes: ['projects:read'],
     });
 
     const result = await client.callTool({ name: 'list_projects', arguments: {} });
 
-    expect(result.content).toEqual([
-      {
-        type: 'text',
-        text: "Found 1 project across 1 workspace: 'Roadmap' (Acme Co, member)",
-      },
-    ]);
-    expect(result.structuredContent).toMatchObject({
-      projects: [{ role: 'member' }],
-      workspaces: [{ projects: [{ role: 'member' }] }],
-    });
-
+    expect(result.structuredContent).toEqual({ projects: [], workspaces: [] });
+    expect(result.content).toEqual([{ type: 'text', text: 'No accessible projects found.' }]);
     await cleanup();
   });
 
-  it('rejects calls missing projects:read scope before querying projects', async () => {
+  it('rejects calls missing projects:read scope', async () => {
     const { client, cleanup } = await createTestClient({
-      userId: 'user-noscope',
+      userId: 'scope-only-user',
       scopes: ['openid', 'workspaces:read'],
     });
 
@@ -206,8 +222,6 @@ describe('registerListProjectsTool', () => {
     expect((result.content as Array<{ text: string }>)[0].text).toContain(
       'Missing required scope: projects:read',
     );
-    expect(mockedListProjects).not.toHaveBeenCalled();
-
     await cleanup();
   });
 });

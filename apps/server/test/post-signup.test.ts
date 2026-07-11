@@ -8,7 +8,7 @@ import { inArray } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 
 import { listWorkspacesForUser } from '../src/workspaces/service.js';
-import { listProjectsForUser } from '../src/projects/service.js';
+import { listAuthorizedProjectsForUser } from '../src/projects/resolver.js';
 
 // ---- helpers ----
 
@@ -74,7 +74,7 @@ describe('post-signup hook', () => {
     expect(workspaceList).toHaveLength(1);
     expect(workspaceList[0].role).toBe('owner');
 
-    const projectList = await listProjectsForUser(userId);
+    const projectList = await listAuthorizedProjectsForUser(userId);
     expect(projectList).toHaveLength(1);
     expect(projectList[0].role).toBe('owner');
     expect(projectList[0].name).toBe('Personal');
@@ -89,7 +89,7 @@ describe('post-signup hook', () => {
     expect(workspaceList[0].name).toBe("Bob's Workspace");
     expect(workspaceList[0].slug).toMatch(/^bobs-workspace/);
 
-    const projectList = await listProjectsForUser(userId);
+    const projectList = await listAuthorizedProjectsForUser(userId);
     expect(projectList[0].name).toBe('Personal');
   });
 
@@ -101,7 +101,7 @@ describe('post-signup hook', () => {
     expect(workspaceList).toHaveLength(1);
     expect(workspaceList[0].name).toBe('Personal');
 
-    const projectList = await listProjectsForUser(userId);
+    const projectList = await listAuthorizedProjectsForUser(userId);
     expect(projectList).toHaveLength(1);
     expect(projectList[0].name).toBe('Personal');
   });
@@ -121,8 +121,8 @@ describe('post-signup hook', () => {
     expect(wslugs[0]).toMatch(/^charlies-workspace/);
     expect(wslugs[1]).toMatch(/^charlies-workspace-\d+/);
 
-    const projectList1 = await listProjectsForUser(id1);
-    const projectList2 = await listProjectsForUser(id2);
+    const projectList1 = await listAuthorizedProjectsForUser(id1);
+    const projectList2 = await listAuthorizedProjectsForUser(id2);
 
     // Project slugs are unique only within a workspace, so each user's
     // "Personal" project — living in its own workspace — keeps the clean slug.
@@ -137,7 +137,7 @@ describe('post-signup hook', () => {
     const workspaceList = await listWorkspacesForUser(userId);
     expect(workspaceList[0].role).toBe('owner');
 
-    const projectList = await listProjectsForUser(userId);
+    const projectList = await listAuthorizedProjectsForUser(userId);
     expect(projectList[0].role).toBe('owner');
   });
 });

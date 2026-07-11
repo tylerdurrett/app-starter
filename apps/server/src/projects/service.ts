@@ -3,10 +3,8 @@ import {
   projects,
   projectMemberships,
   users,
-  workspaces,
-  workspaceMemberships,
 } from '@repo/db';
-import { eq, and } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { ensureUniqueSlug } from './slug.js';
 import { type ProjectRole, type ProjectPermission } from './permissions.js';
 import { findAuthorizedProjectById, resolveProjectWithOverride } from './resolver.js';
@@ -121,144 +119,6 @@ function isSlugUniqueViolation(err: unknown): boolean {
     current = e.cause;
   }
   return false;
-}
-
-export async function listProjectsForUser(userId: string) {
-  const accessibleProjects = await listAccessibleProjectsForUser(userId);
-
-  return accessibleProjects
-    .map(({ workspace, access: _access, ...project }) => ({
-      ...project,
-      workspaceId: workspace.id,
-      workspaceSlug: workspace.slug,
-      workspaceName: workspace.name,
-    }))
-    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-}
-
-export interface AccessibleProject {
-  id: string;
-  name: string;
-  slug: string;
-  role: ProjectRole;
-  access: 'project_membership' | 'workspace_admin' | 'workspace_member';
-  createdAt: Date;
-  updatedAt: Date;
-  workspace: {
-    id: string;
-    name: string;
-    slug: string;
-  };
-}
-
-interface AccessibleProjectRow extends AccessibleProject {
-  workspaceCreatedAt: Date;
-}
-
-/**
- * List every project the user can read through workspace or project access.
- * Direct project membership keeps the same precedence as
- * resolveProjectWithOverride().
- */
-export async function listAccessibleProjectsForUser(
-  userId: string,
-  opts: { workspaceSlug?: string } = {},
-): Promise<AccessibleProject[]> {
-  const directWhere = opts.workspaceSlug
-    ? and(eq(projectMemberships.userId, userId), eq(workspaces.slug, opts.workspaceSlug))
-    : eq(projectMemberships.userId, userId);
-
-  const directProjects = await db
-    .select({
-      id: projects.id,
-      name: projects.name,
-      slug: projects.slug,
-      role: projectMemberships.role,
-      createdAt: projects.createdAt,
-      updatedAt: projects.updatedAt,
-      workspaceId: workspaces.id,
-      workspaceName: workspaces.name,
-      workspaceSlug: workspaces.slug,
-      workspaceCreatedAt: workspaces.createdAt,
-    })
-    .from(projectMemberships)
-    .innerJoin(projects, eq(projectMemberships.projectId, projects.id))
-    .innerJoin(workspaces, eq(projects.workspaceId, workspaces.id))
-    .where(directWhere);
-
-  const workspaceWhere = opts.workspaceSlug
-    ? and(eq(workspaceMemberships.userId, userId), eq(workspaces.slug, opts.workspaceSlug))
-    : eq(workspaceMemberships.userId, userId);
-
-  const workspaceProjects = await db
-    .select({
-      id: projects.id,
-      name: projects.name,
-      slug: projects.slug,
-      workspaceRole: workspaceMemberships.role,
-      createdAt: projects.createdAt,
-      updatedAt: projects.updatedAt,
-      workspaceId: workspaces.id,
-      workspaceName: workspaces.name,
-      workspaceSlug: workspaces.slug,
-      workspaceCreatedAt: workspaces.createdAt,
-    })
-    .from(workspaceMemberships)
-    .innerJoin(workspaces, eq(workspaceMemberships.workspaceId, workspaces.id))
-    .innerJoin(projects, eq(projects.workspaceId, workspaces.id))
-    .where(workspaceWhere);
-
-  const rowsByProjectId = new Map<string, AccessibleProjectRow>();
-
-  for (const project of directProjects) {
-    rowsByProjectId.set(project.id, {
-      id: project.id,
-      name: project.name,
-      slug: project.slug,
-      role: project.role as ProjectRole,
-      access: 'project_membership',
-      createdAt: project.createdAt,
-      updatedAt: project.updatedAt,
-      workspaceCreatedAt: project.workspaceCreatedAt,
-      workspace: {
-        id: project.workspaceId,
-        name: project.workspaceName,
-        slug: project.workspaceSlug,
-      },
-    });
-  }
-
-  for (const project of workspaceProjects) {
-    if (rowsByProjectId.has(project.id)) continue;
-    const hasAdminAccess = project.workspaceRole === 'owner' || project.workspaceRole === 'manager';
-    rowsByProjectId.set(project.id, {
-      id: project.id,
-      name: project.name,
-      slug: project.slug,
-      role: hasAdminAccess ? 'owner' : 'member',
-      access: hasAdminAccess ? 'workspace_admin' : 'workspace_member',
-      createdAt: project.createdAt,
-      updatedAt: project.updatedAt,
-      workspaceCreatedAt: project.workspaceCreatedAt,
-      workspace: {
-        id: project.workspaceId,
-        name: project.workspaceName,
-        slug: project.workspaceSlug,
-      },
-    });
-  }
-
-  return [...rowsByProjectId.values()]
-    .sort(
-      (a, b) =>
-        a.workspaceCreatedAt.getTime() - b.workspaceCreatedAt.getTime() ||
-        a.createdAt.getTime() - b.createdAt.getTime(),
-    )
-    .map(({ workspaceCreatedAt: _workspaceCreatedAt, ...project }) => project);
-}
-
-export async function getProjectBySlug(slug: string, actorUserId: string, workspaceSlug: string) {
-  return resolveProjectAndRole(slug, actorUserId, undefined, workspaceSlug);
 }
 
 export async function updateProject(
