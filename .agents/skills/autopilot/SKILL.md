@@ -19,7 +19,7 @@ Run one triaged `size:slice` issue through the whole slice lifecycle — decompo
 
 - **Triaged slices only.** The input must be an open `size:slice` issue that `/triage` already processed. Anything else stops at the precondition guard — this skill never triages or grills the slice itself.
 - **Compose, never reimplement.** Each stage invokes the existing skill. No stage logic is duplicated here.
-- **The severity gate is non-negotiable.** A blocking finding (any of the four categories) halts the run before batch. There is no flag to override it.
+- **The severity gate is non-negotiable.** A blocking finding (any of the three plan-poisoning categories) halts the run before batch. There is no flag to override it.
 - **Stages 1–4 run as sub-agents; the batch legs (5 and 6) run inline.** For stages 1–4 never run the skill inline in the orchestrator and never carry a stage's full working payload past its summary. Stages 5 and 6 are the exception — `/batch` must be driven from the orchestrator's own loop so its background `Workflow`'s completion notification returns to the calling loop (proven in the main loop, uncertain inside a nested `Task`), and it adds no context cost since batch isolates every task itself. Stage 6's triage sub-step still fans out to sub-agents.
 - **Never merge the slice promotion PR.** `/batch` opens it in review-first mode; the human review of that PR is the safety net that makes routine auto-apply acceptable. The cleanup sweep merges its tasks into the slice *branch*, which updates that same PR — it never opens a second PR and never merges the slice PR. Autopilot ends when the PR is open and the cleanup queue is drained (or when it reports why it couldn't).
 - **The cleanup sweep is bounded and never halts the handoff.** It drains the deferred `cleanup` children by triage+batch, drain-until-dry, capped at 3 rounds. Because the slice PR is *already open and reviewable* once stage 5 finishes, a cleanup task that won't triage to `ready-for-agent` or that code-review holds is **reported, not halted on** — it stays an open issue/task-PR and the run still hands back with the slice PR. The cap and the "report, don't halt" rule are what guarantee the sweep terminates.
@@ -62,14 +62,15 @@ After each stage returns (a sub-agent's summary for stages 1–4, batch's own en
 
 The heart of the autonomy design. During the audit stage, every surviving finding is classified:
 
-- **Routine** — wording fixes, coverage gaps closable by a per-child body edit, a task that needs a small tweak. Auto-apply (per-child `## Audit findings` body edits, the synthesis comment, in-bar propagation comments) and proceed. No human pause.
-- **Blocking / structural** — the plan itself is wrong. Exactly four categories:
-  1. A "task" that is actually slice-sized.
-  2. Slice scope drift — the audit found uncovered scope that changes the slice's boundary.
-  3. A sequencing reversal that breaks the DAG.
-  4. Hallucinated API surface that a task depends on.
+- **Routine** — wording fixes, coverage gaps closable by a per-child body edit, a task that needs a small tweak, **and a `sizing` finding (a task that reads as oversized / "two tasks' worth")**. Auto-apply (per-child `## Audit findings` body edits, the synthesis comment, in-bar propagation comments) and proceed. No human pause.
+- **Blocking / structural** — the plan is *plan-poisoning*: it corrupts more than the one child it names, so a batch built on it wastes a full parallel run. Exactly three categories:
+  1. Slice scope drift — the audit found uncovered scope that changes the slice's boundary.
+  2. A sequencing reversal that breaks the DAG.
+  3. Hallucinated API surface that a task depends on.
 
-When any blocking finding surfaces: **HALT**. Summarize the blocking finding(s) — claim, provenance, which child, why it's structural — and return control to the user. Do not proceed to the triage or batch stages. When genuinely unsure which side a finding falls on, treat it as blocking — a halt costs a re-run; a batch on a broken plan costs a full parallel execution.
+When any blocking finding surfaces: **HALT**. Summarize the blocking finding(s) — claim, provenance, which child, why it's structural — and return control to the user. Do not proceed to the triage or batch stages. When genuinely unsure whether a finding is one of these three plan-poisoning categories, treat it as blocking — a halt costs a re-run; a batch on a poisoned plan costs a full parallel execution.
+
+**Why `sizing` is routine, not blocking.** An oversized task is *local to the one child it names and self-correcting at the promotion-PR review* — it costs at most one dense PR, never a wasted batch. That is the exact opposite of the three blocking categories, each of which poisons multiple tasks or the DAG. A `size:task` is *defined* as "one PR's worth," so a big-but-coherent task still executes in a single batch worktree and the human sees it whole in the review. Autopilot therefore records the audit's `sizing` note (the audit already lands it as a per-child body edit) and proceeds — it never halts to split a task. Splitting is not audit's job to begin with: audit's slice mode creates **no** children — "slice-level gaps are a `/decompose` re-decompose problem; task is a leaf." If automated splitting is ever wanted, its home is a *surgical slice re-decompose in `/decompose`* (a task is a leaf, so there is no "decompose the task" — an oversized task means the slice→task cut was slightly wrong), invoked as its own sub-stage between audit and triage — never in audit, and never as a halt.
 
 Why routine findings can auto-proceed: the downstream safety net. Every task inside `/batch` gets an independent code review, and the run ends in a slice promotion PR the user reviews before anything reaches the feature branch. The severity halt doesn't exist to protect correctness — the PR gate does that — it exists to avoid wasting a full parallel batch run on a structurally broken plan.
 
