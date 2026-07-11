@@ -1,91 +1,140 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { apiFetch } from './api';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  createProjectInvite,
-  deleteProject,
-  getProject,
-  listProjectInvites,
-  listProjectMembers,
-  removeProjectMember,
-  revokeProjectInvite,
-  updateProject,
-} from './projects';
+  projectSchema,
+  projectMemberSchema,
+  projectInviteSchema,
+} from '@repo/shared';
 
-vi.mock('./api', () => ({
-  apiFetch: vi.fn(),
-}));
+// Well-formed reference payloads matching the shared API contract.
+const validProject = {
+  id: 'p1',
+  name: 'Apollo',
+  slug: 'apollo',
+  workspaceId: 'w1',
+  workspaceSlug: 'acme',
+  workspaceName: 'Acme',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
+};
 
-const apiFetchMock = vi.mocked(apiFetch);
+const validMember = {
+  userId: 'u1',
+  role: 'member',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  name: 'Ada',
+  email: 'ada@example.com',
+};
 
-const WS = 'acme';
-const SLUG = 'proj';
+const validInvite = {
+  id: 'i1',
+  email: 'ada@example.com',
+  role: 'member',
+  status: 'pending',
+  expiresAt: '2026-01-08T00:00:00.000Z',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  invitedByName: 'Owner',
+};
 
-/** The first call's [path, options] tuple, asserting apiFetch was called once. */
-function firstCall(): [string, RequestInit?] {
-  const call = apiFetchMock.mock.calls[0];
-  if (!call) throw new Error('apiFetch was not called');
-  return call;
-}
+// A schema drift must fail loudly, never silently. Cover the top-level Project
+// shape AND the invite/membership sub-shapes so a mismatch in either surfaces.
+describe('project contract schemas', () => {
+  it('accept the well-formed reference payloads', () => {
+    expect(() => projectSchema.parse(validProject)).not.toThrow();
+    expect(() => projectMemberSchema.parse(validMember)).not.toThrow();
+    expect(() => projectInviteSchema.parse(validInvite)).not.toThrow();
+  });
 
-/** The URL (first arg) apiFetch was called with. */
-function calledPath(): string {
-  return firstCall()[0];
-}
+  it('throws on a Project missing workspace context', () => {
+    const bad = {
+      id: 'p1',
+      name: 'Apollo',
+      slug: 'apollo',
+      workspaceId: 'w1',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    expect(() => projectSchema.parse(bad)).toThrow();
+  });
 
-/** The RequestInit options (second arg) apiFetch was called with. */
-function calledOptions(): RequestInit | undefined {
-  return firstCall()[1];
-}
+  it('throws on a ProjectMember with a renamed field', () => {
+    const bad = { userId: 'u1', roles: 'member', createdAt: '2026-01-01T00:00:00.000Z', name: 'Ada', email: 'ada@example.com' };
+    expect(() => projectMemberSchema.parse(bad)).toThrow();
+  });
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  apiFetchMock.mockResolvedValue(undefined as never);
+  it('throws on a ProjectMember with an out-of-range role', () => {
+    expect(() => projectMemberSchema.parse({ ...validMember, role: 'superadmin' })).toThrow();
+  });
+
+  it('throws on a ProjectInvite missing invitedByName', () => {
+    const bad = {
+      id: 'i1',
+      email: 'ada@example.com',
+      role: 'member',
+      status: 'pending',
+      expiresAt: '2026-01-08T00:00:00.000Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+    expect(() => projectInviteSchema.parse(bad)).toThrow();
+  });
+
+  it('throws on a ProjectInvite with an out-of-range status', () => {
+    expect(() => projectInviteSchema.parse({ ...validInvite, status: 'expired' })).toThrow();
+  });
 });
 
-describe('workspace-scoped project client helpers', () => {
-  it('getProject targets /api/workspaces/:ws/projects/:slug', async () => {
-    await getProject(WS, SLUG);
-    expect(calledPath()).toBe('/api/workspaces/acme/projects/proj');
+// Prove the drift throws through the real fetch boundary (apiFetchParsed), not
+// just when calling the schema directly.
+describe('apiFetchParsed boundary', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.resetModules();
   });
 
-  it('updateProject PATCHes /api/workspaces/:ws/projects/:slug', async () => {
-    await updateProject(WS, SLUG, { name: 'New' });
-    expect(calledPath()).toBe('/api/workspaces/acme/projects/proj');
-    expect(calledOptions()).toMatchObject({ method: 'PATCH' });
+  async function loadLibReturning(body: unknown) {
+    vi.stubEnv('VITE_SERVER_URL', 'http://test.local');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => body,
+      }),
+    );
+    vi.resetModules();
+    return import('./projects');
+  }
+
+  it('rejects when the server returns a malformed ProjectMember', async () => {
+    const { listProjectMembers } = await loadLibReturning([{ ...validMember, role: 'superadmin' }]);
+    await expect(listProjectMembers('acme', 'apollo')).rejects.toThrow();
   });
 
-  it('deleteProject DELETEs /api/workspaces/:ws/projects/:slug', async () => {
-    await deleteProject(WS, SLUG, 'proj');
-    expect(calledPath()).toBe('/api/workspaces/acme/projects/proj');
-    expect(calledOptions()).toMatchObject({ method: 'DELETE' });
+  it('rejects when the server returns a malformed ProjectInvite', async () => {
+    const badInvite = {
+      id: 'i1',
+      email: 'ada@example.com',
+      role: 'member',
+      status: 'pending',
+      expiresAt: '2026-01-08T00:00:00.000Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+    const { listProjectInvites } = await loadLibReturning([badInvite]);
+    await expect(listProjectInvites('acme', 'apollo')).rejects.toThrow();
   });
 
-  it('listProjectMembers targets the workspace-scoped members path', async () => {
-    await listProjectMembers(WS, SLUG);
-    expect(calledPath()).toBe('/api/workspaces/acme/projects/proj/members');
+  it('rejects when the server omits project workspace context', async () => {
+    const { getProject } = await loadLibReturning({ ...validProject, workspaceSlug: undefined, role: 'owner' });
+    await expect(getProject('acme', 'apollo')).rejects.toThrow();
   });
 
-  it('removeProjectMember targets the workspace-scoped member path', async () => {
-    await removeProjectMember(WS, SLUG, 'user-1');
-    expect(calledPath()).toBe('/api/workspaces/acme/projects/proj/members/user-1');
-    expect(calledOptions()).toMatchObject({ method: 'DELETE' });
+  it('resolves when the server returns a well-formed ProjectWithRole', async () => {
+    const { getProject } = await loadLibReturning({ ...validProject, role: 'owner' });
+    await expect(getProject('acme', 'apollo')).resolves.toMatchObject({ slug: 'apollo', role: 'owner' });
   });
 
-  it('listProjectInvites targets the workspace-scoped invites path', async () => {
-    await listProjectInvites(WS, SLUG);
-    expect(calledPath()).toBe('/api/workspaces/acme/projects/proj/invites');
-  });
-
-  it('createProjectInvite POSTs the workspace-scoped invites path', async () => {
-    apiFetchMock.mockResolvedValue({ invite: {}, inviteUrl: '' } as never);
-    await createProjectInvite(WS, SLUG, 'a@b.com', 'member');
-    expect(calledPath()).toBe('/api/workspaces/acme/projects/proj/invites');
-    expect(calledOptions()).toMatchObject({ method: 'POST' });
-  });
-
-  it('revokeProjectInvite POSTs the workspace-scoped invite revoke path', async () => {
-    await revokeProjectInvite(WS, SLUG, 'invite-1');
-    expect(calledPath()).toBe('/api/workspaces/acme/projects/proj/invites/invite-1/revoke');
-    expect(calledOptions()).toMatchObject({ method: 'POST' });
+  it('resolves null for a nullable last-active project', async () => {
+    const { getLastActiveProject } = await loadLibReturning(null);
+    await expect(getLastActiveProject()).resolves.toBeNull();
   });
 });

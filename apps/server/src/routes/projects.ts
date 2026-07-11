@@ -17,6 +17,45 @@ import { listInvites, createInvite, revokeInvite } from '../projects/invites.js'
 import { resolveWorkspaceAndRole } from '../workspaces/service.js';
 import { db, workspaces } from '@repo/db';
 import { eq } from 'drizzle-orm';
+import type {
+  Project,
+  ProjectWithRole,
+  ProjectMember,
+  ProjectInvite,
+  ProjectInviteCreateResult,
+} from '@repo/shared';
+import type { AssertWire, Elem, WireContract } from '../workspaces/wire-contract.js';
+
+// Compile-time contract: the project route replies below serialize to the
+// shared @repo/shared schemas. A drifting field breaks the build here. The
+// create/get/update replies enrich the raw project row with parent-workspace
+// context (workspaceSlug/workspaceName), so the asserted reply types include it.
+type _CreateProject = AssertWire<
+  WireContract<
+    NonNullable<Awaited<ReturnType<typeof createProject>>> & { workspaceSlug: string; workspaceName: string },
+    Project
+  >
+>;
+type _UpdateProject = AssertWire<
+  WireContract<
+    NonNullable<Awaited<ReturnType<typeof updateProject>>> & { workspaceSlug: string; workspaceName: string },
+    Project
+  >
+>;
+type _ListProjects = AssertWire<WireContract<Elem<Awaited<ReturnType<typeof listProjectsForUser>>>, ProjectWithRole>>;
+type _GetProject = AssertWire<
+  WireContract<
+    Awaited<ReturnType<typeof getProjectBySlug>> extends { project: infer P; role: infer R }
+      ? P & { role: R; workspaceSlug: string; workspaceName: string }
+      : never,
+    ProjectWithRole
+  >
+>;
+type _LastActiveProject = AssertWire<
+  WireContract<NonNullable<Awaited<ReturnType<typeof getLastActiveProject>>>, Project>
+>;
+type _ListMembers = AssertWire<WireContract<Elem<Awaited<ReturnType<typeof listMembers>>>, ProjectMember>>;
+type _ListInvites = AssertWire<WireContract<Elem<Awaited<ReturnType<typeof listInvites>>>, ProjectInvite>>;
 
 interface ProjectSlugParams {
   workspaceSlug: string;
@@ -47,7 +86,13 @@ const projectRoutes: FastifyPluginAsync = async (app) => {
       workspaceId: workspace.id,
       ownerUserId: user.id,
     });
-    return reply.status(201).send(project);
+    // Enrich with workspace slug/name so the reply satisfies the shared Project
+    // contract (the raw project row carries only workspaceId).
+    return reply.status(201).send({
+      ...project,
+      workspaceSlug: workspace.slug,
+      workspaceName: workspace.name,
+    });
   });
 
   app.get('/api/projects', async (request) => {
@@ -94,7 +139,7 @@ const projectRoutes: FastifyPluginAsync = async (app) => {
     async (request) => {
       const { user } = await requireUser(request);
       const { workspaceSlug, projectSlug } = request.params;
-      return updateProject(
+      const project = await updateProject(
         projectSlug,
         user.id,
         {
@@ -102,6 +147,25 @@ const projectRoutes: FastifyPluginAsync = async (app) => {
         },
         workspaceSlug,
       );
+      // resolveProjectAndRole (inside updateProject) already verified the row
+      // exists; a missing return means it was deleted concurrently.
+      if (!project) {
+        throw new ServiceError('NOT_FOUND', 'Project not found');
+      }
+      // Enrich with workspace slug/name so the reply satisfies the shared
+      // Project contract (the raw updated row carries only workspaceId).
+      const [workspace] = await db
+        .select({ slug: workspaces.slug, name: workspaces.name })
+        .from(workspaces)
+        .where(eq(workspaces.id, project.workspaceId));
+      if (!workspace) {
+        throw new ServiceError('NOT_FOUND', 'Workspace not found for project');
+      }
+      return {
+        ...project,
+        workspaceSlug: workspace.slug,
+        workspaceName: workspace.name,
+      };
     },
   );
 
@@ -167,7 +231,32 @@ const projectRoutes: FastifyPluginAsync = async (app) => {
         workspaceSlug,
       );
       const inviteUrl = `${config.webOrigin}/invite/project/${token}`;
-      return reply.status(201).send({ invite, inviteUrl });
+      // The shared invite lifecycle types its tables as bare PgTable (#66), so
+      // the returned row is loosely typed; narrow it to the columns we project.
+      const row = invite as unknown as {
+        id: string;
+        email: string;
+        role: string;
+        status: string;
+        expiresAt: Date;
+        createdAt: Date;
+      };
+      // Project onto the shared contract: the raw row omits invitedByName (the
+      // actor created it) and carries internal columns (tokenHash, FKs) that
+      // must not leak to the client.
+      const result: ProjectInviteCreateResult = {
+        invite: {
+          id: row.id,
+          email: row.email,
+          role: row.role as ProjectInvite['role'],
+          status: row.status as ProjectInvite['status'],
+          expiresAt: row.expiresAt.toISOString(),
+          createdAt: row.createdAt.toISOString(),
+          invitedByName: user.name,
+        },
+        inviteUrl,
+      };
+      return reply.status(201).send(result);
     },
   );
 
