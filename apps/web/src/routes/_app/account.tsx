@@ -4,8 +4,8 @@ import { Copy, Check } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useSession, updateUser, changeEmail, changePassword } from '../../lib/auth-client';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
-import { PASSWORD_MIN_LENGTH } from '@repo/shared';
-import { apiFetch } from '../../lib/api';
+import { PASSWORD_MIN_LENGTH, mcpConnectorSchema } from '@repo/shared';
+import { apiFetchParsed } from '../../lib/api';
 
 export const Route = createFileRoute('/_app/account')({
   component: AccountPage,
@@ -41,7 +41,7 @@ function AccountPage() {
   // MCP connector
   const mcpQuery = useQuery({
     queryKey: ['me', 'mcp-connector'],
-    queryFn: () => apiFetch<{ url: string }>('/api/me/mcp-connector'),
+    queryFn: () => apiFetchParsed('/api/me/mcp-connector', mcpConnectorSchema),
   });
   const mcpUrl = mcpQuery.data?.url ?? '';
   const [copied, setCopied] = useState(false);

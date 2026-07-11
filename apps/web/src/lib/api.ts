@@ -46,3 +46,27 @@ export async function apiFetch<T>(
 
   return res.json();
 }
+
+/**
+ * Structural view of a schema's parse method. Zod schemas satisfy this, so the
+ * web layer can validate responses without taking a direct dependency on zod —
+ * the schemas (and their inferred types) live in `@repo/shared`.
+ */
+export interface ResponseSchema<T> {
+  parse(data: unknown): T;
+}
+
+/**
+ * `apiFetch` variant that validates the JSON response against a schema and
+ * throws if it does not match. Use for endpoints that return a body; body-less
+ * (204) endpoints keep using {@link apiFetch}. Preserves all `apiFetch`
+ * behavior (credentials, headers, `ApiError` on non-ok).
+ */
+export async function apiFetchParsed<T>(
+  path: string,
+  schema: ResponseSchema<T>,
+  options?: RequestInit,
+): Promise<T> {
+  const json = await apiFetch<unknown>(path, options);
+  return schema.parse(json);
+}

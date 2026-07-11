@@ -166,7 +166,7 @@ describe('POST /api/project-invites/:token/accept', () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.projectSlug).toBe(project.slug);
-    expect(body.projectName).toBe('Accept Project');
+    expect(body.projectId).toBe(project.id);
 
     // Verify Bob can now access the project
     const check = await app.inject({
