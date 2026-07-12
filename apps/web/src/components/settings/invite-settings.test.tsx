@@ -205,9 +205,11 @@ describe('InviteSettings', () => {
   it('tracks revoke pending state per invite, refreshes after success, and presents API errors', async () => {
     const user = userEvent.setup();
     const firstRevoke = deferred<unknown>();
+    const secondRevoke = deferred<unknown>();
     const revokeInvite = vi
       .fn<InviteSettingsAdapter['revokeInvite']>()
       .mockImplementationOnce(() => firstRevoke.promise)
+      .mockImplementationOnce(() => secondRevoke.promise)
       .mockRejectedValueOnce(
         new ApiError(403, JSON.stringify({ error: { message: 'Invite cannot be revoked' } })),
       );
@@ -222,10 +224,24 @@ describe('InviteSettings', () => {
     expect(secondButton).toBeEnabled();
     expect(revokeInvite).toHaveBeenCalledWith('invite-1');
 
+    await user.click(secondButton);
+    expect(firstButton).toBeDisabled();
+    expect(secondButton).toBeDisabled();
+    expect(revokeInvite).toHaveBeenCalledTimes(2);
+    expect(revokeInvite).toHaveBeenLastCalledWith('invite-2');
+
+    await user.click(firstButton);
+    await user.click(secondButton);
+    expect(revokeInvite).toHaveBeenCalledTimes(2);
+
     firstRevoke.resolve(undefined);
     await waitFor(() => expect(settingsAdapter.refreshInvites).toHaveBeenCalledOnce());
     await waitFor(() => expect(firstButton).toBeEnabled());
+    expect(secondButton).toBeDisabled();
 
+    secondRevoke.resolve(undefined);
+    await waitFor(() => expect(settingsAdapter.refreshInvites).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(secondButton).toBeEnabled());
     await user.click(secondButton);
     expect(await screen.findByText('Invite cannot be revoked')).toBeInTheDocument();
     expect(revokeInvite).toHaveBeenLastCalledWith('invite-2');

@@ -39,7 +39,10 @@ export function InviteSettings({ adapter }: { adapter: InviteSettingsAdapter }) 
   const [role, setRole] = useState<InviteRole>('member');
   const [inviteUrl, setInviteUrl] = useState('');
   const [copied, setCopied] = useState(false);
+  const [pendingRevokeIds, setPendingRevokeIds] = useState<ReadonlySet<string>>(new Set());
+  const [revokeError, setRevokeError] = useState<unknown>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pendingRevokeIdsRef = useRef(new Set<string>());
 
   const createMutation = useMutation({
     mutationFn: ({
@@ -59,6 +62,11 @@ export function InviteSettings({ adapter }: { adapter: InviteSettingsAdapter }) 
     mutationFn: (inviteId: string) => adapter.revokeInvite(inviteId),
     onSuccess: async () => {
       await adapter.refreshInvites();
+    },
+    onError: (error) => setRevokeError(error),
+    onSettled: (_data, _error, inviteId) => {
+      pendingRevokeIdsRef.current.delete(inviteId);
+      setPendingRevokeIds(new Set(pendingRevokeIdsRef.current));
     },
   });
 
@@ -91,6 +99,15 @@ export function InviteSettings({ adapter }: { adapter: InviteSettingsAdapter }) 
     setCopied(true);
     clearTimeout(copyTimerRef.current);
     copyTimerRef.current = setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleRevoke = (inviteId: string) => {
+    if (pendingRevokeIdsRef.current.has(inviteId)) return;
+
+    pendingRevokeIdsRef.current.add(inviteId);
+    setPendingRevokeIds(new Set(pendingRevokeIdsRef.current));
+    setRevokeError(null);
+    revokeMutation.mutate(inviteId);
   };
 
   const resetForm = () => {
@@ -182,9 +199,9 @@ export function InviteSettings({ adapter }: { adapter: InviteSettingsAdapter }) 
         {adapter.canList && invitesQuery.isError && (
           <p className="text-sm text-destructive">Failed to load invites</p>
         )}
-        {revokeMutation.isError && (
+        {revokeError !== null && (
           <p className="text-sm text-destructive">
-            {apiErrorMessage(revokeMutation.error, 'Failed to revoke invite')}
+            {apiErrorMessage(revokeError, 'Failed to revoke invite')}
           </p>
         )}
         {adapter.canList &&
@@ -208,8 +225,8 @@ export function InviteSettings({ adapter }: { adapter: InviteSettingsAdapter }) 
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => revokeMutation.mutate(invite.id)}
-                    disabled={revokeMutation.isPending && revokeMutation.variables === invite.id}
+                    onClick={() => handleRevoke(invite.id)}
+                    disabled={pendingRevokeIds.has(invite.id)}
                     title={`Revoke invite for ${invite.email}`}
                   >
                     <X className="w-4 h-4 text-destructive" />
