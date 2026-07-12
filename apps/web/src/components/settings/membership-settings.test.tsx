@@ -22,6 +22,12 @@ const grace: MembershipMember = {
   email: 'grace@example.com',
   role: 'member',
 };
+const katherine: MembershipMember = {
+  userId: 'user-3',
+  name: 'Katherine Johnson',
+  email: 'katherine@example.com',
+  role: 'member',
+};
 
 function createAdapter(
   overrides: Partial<MembershipSettingsAdapter<MembershipMember>> = {},
@@ -145,6 +151,76 @@ describe('MembershipSettings', () => {
 
     await waitFor(() => expect(listMembers).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByText('Grace Hopper')).not.toBeInTheDocument());
+  });
+
+  it('tracks concurrent removals independently and prevents duplicate submissions', async () => {
+    const user = userEvent.setup();
+    const graceRemoval = deferred<void>();
+    const katherineRemoval = deferred<void>();
+    const listMembers = vi.fn().mockResolvedValue([ada, grace, katherine]);
+    const removeMember = vi.fn((userId: string) => {
+      if (userId === grace.userId) return graceRemoval.promise;
+      if (userId === katherine.userId) return katherineRemoval.promise;
+      return Promise.resolve();
+    });
+    renderMembership(createAdapter({ listMembers, removeMember }), 'someone-else');
+
+    const graceButton = await screen.findByTitle('Remove Grace Hopper');
+    const katherineButton = screen.getByTitle('Remove Katherine Johnson');
+    act(() => {
+      graceButton.click();
+      graceButton.click();
+    });
+    await waitFor(() => expect(removeMember).toHaveBeenCalledOnce());
+    await user.click(katherineButton);
+
+    expect(removeMember).toHaveBeenCalledTimes(2);
+    expect(removeMember).toHaveBeenCalledWith(grace.userId);
+    expect(removeMember).toHaveBeenCalledWith(katherine.userId);
+    expect(graceButton).toBeDisabled();
+    expect(katherineButton).toBeDisabled();
+
+    await act(async () => graceRemoval.resolve());
+    await waitFor(() => expect(listMembers).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(graceButton).toBeEnabled());
+    expect(katherineButton).toBeDisabled();
+
+    await act(async () => katherineRemoval.resolve());
+    await waitFor(() => expect(listMembers).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(katherineButton).toBeEnabled());
+  });
+
+  it('retains structured errors from independently settling removals', async () => {
+    const user = userEvent.setup();
+    const graceRemoval = deferred<void>();
+    const katherineRemoval = deferred<void>();
+    const removeMember = vi.fn((userId: string) =>
+      userId === grace.userId ? graceRemoval.promise : katherineRemoval.promise,
+    );
+    renderMembership(
+      createAdapter({
+        listMembers: vi.fn().mockResolvedValue([ada, grace, katherine]),
+        removeMember,
+      }),
+      'someone-else',
+    );
+
+    await user.click(await screen.findByTitle('Remove Grace Hopper'));
+    await user.click(screen.getByTitle('Remove Katherine Johnson'));
+
+    await act(async () =>
+      graceRemoval.reject(
+        new ApiError(409, JSON.stringify({ error: { message: 'Grace owns a project' } })),
+      ),
+    );
+    expect(await screen.findByText('Grace owns a project')).toBeInTheDocument();
+    expect(screen.getByTitle('Remove Grace Hopper')).toBeEnabled();
+    expect(screen.getByTitle('Removing Katherine Johnson')).toBeDisabled();
+
+    await act(async () => katherineRemoval.reject(new Error('network unavailable')));
+    expect(await screen.findByText('Failed to remove Katherine Johnson')).toBeInTheDocument();
+    expect(screen.getByText('Grace owns a project')).toBeInTheDocument();
+    expect(screen.getByTitle('Remove Katherine Johnson')).toBeEnabled();
   });
 
   it('presents structured query and removal errors with stable fallbacks', async () => {
