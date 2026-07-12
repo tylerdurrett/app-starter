@@ -1,9 +1,6 @@
-function getServerUrl(): string {
-  const serverUrl = import.meta.env.VITE_SERVER_URL;
-  if (!serverUrl) {
-    throw new Error('VITE_SERVER_URL environment variable is required');
-  }
-  return serverUrl;
+const SERVER_URL = import.meta.env.VITE_SERVER_URL;
+if (!SERVER_URL) {
+  throw new Error('VITE_SERVER_URL environment variable is required');
 }
 
 export class ApiError extends Error {
@@ -48,7 +45,7 @@ export async function apiFetch<T>(
   path: string,
   options?: RequestInit,
 ): Promise<T> {
-  const res = await fetch(`${getServerUrl()}${path}`, {
+  const res = await fetch(`${SERVER_URL}${path}`, {
     ...options,
     credentials: 'include',
     headers: {
