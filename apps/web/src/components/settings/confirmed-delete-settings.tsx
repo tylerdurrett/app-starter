@@ -1,53 +1,72 @@
 import { useState, type FormEvent } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+  type UseQueryOptions,
+} from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
+import { apiErrorMessage } from '../../lib/api';
 
-function structuredErrorMessage(error: unknown, fallback: string): string {
-  if (!error || typeof error !== 'object') return fallback;
-
-  // ApiError exposes the server's `{ error: { message } }` payload through
-  // parsedMessage. The structural check keeps this workflow independent of
-  // the HTTP client while preserving its safe, user-facing error text.
-  if ('parsedMessage' in error && typeof error.parsedMessage === 'string') {
-    return error.parsedMessage.trim() || fallback;
-  }
-
-  return fallback;
-}
-
-export interface ConfirmedDeleteSettingsAdapter {
-  /** The current name from the resource's live Query observer. */
-  resourceName: string;
+export interface ConfirmedDeleteSettingsAdapter<Resource> {
+  queryOptions: UseQueryOptions<Resource>;
+  getName: (resource: Resource) => string;
   title: string;
   consequence: string;
   revealButton: string;
   confirmButton: string;
   pendingButton: string;
+  deletedButton: string;
   errorFallback: string;
   deleteResource: (confirmation: string) => Promise<void>;
-  refreshAfterDelete: () => Promise<void>;
+  refreshAfterDelete: (queryClient: QueryClient) => Promise<unknown>;
   onDeleted: () => Promise<void>;
 }
 
-export function ConfirmedDeleteSettings({
+export function ConfirmedDeleteSettings<Resource>({
   adapter,
 }: {
-  adapter: ConfirmedDeleteSettingsAdapter;
+  adapter: ConfirmedDeleteSettingsAdapter<Resource>;
 }) {
+  const queryClient = useQueryClient();
+  const resourceQuery = useQuery(adapter.queryOptions);
+  const resourceName = resourceQuery.data ? adapter.getName(resourceQuery.data) : '';
   const [isConfirming, setIsConfirming] = useState(false);
   const [confirmation, setConfirmation] = useState('');
-  const expectedConfirmation = `Delete ${adapter.resourceName}`;
+  const [deletionCommitted, setDeletionCommitted] = useState(false);
+  const [postDeletePending, setPostDeletePending] = useState(false);
+  const [destinationFailed, setDestinationFailed] = useState(false);
+  const expectedConfirmation = `Delete ${resourceName}`;
   const isExactConfirmation =
-    adapter.resourceName.length > 0 && confirmation === expectedConfirmation;
+    resourceName.length > 0 && confirmation === expectedConfirmation;
 
   const deleteMutation = useMutation({
     mutationFn: (submittedConfirmation: string) =>
       adapter.deleteResource(submittedConfirmation),
     onSuccess: async () => {
-      await adapter.refreshAfterDelete();
-      await adapter.onDeleted();
+      // The destructive write has committed. Cache refresh is best-effort, but
+      // the destination must still run so a stale cache cannot strand the user
+      // on a deleted resource. Neither follow-up failure makes delete retryable.
+      setDeletionCommitted(true);
+      setPostDeletePending(true);
+      try {
+        await adapter.refreshAfterDelete(queryClient);
+      } catch {
+        // Navigation is the safe recovery path after a successful deletion.
+      } finally {
+        try {
+          await adapter.onDeleted();
+        } catch {
+          setDestinationFailed(true);
+        } finally {
+          setPostDeletePending(false);
+        }
+      }
     },
   });
+
+  const controlsLocked = deleteMutation.isPending || deletionCommitted;
 
   const revealConfirmation = () => {
     setConfirmation('');
@@ -56,7 +75,7 @@ export function ConfirmedDeleteSettings({
   };
 
   const cancelConfirmation = () => {
-    if (deleteMutation.isPending) return;
+    if (controlsLocked) return;
     setIsConfirming(false);
     setConfirmation('');
     deleteMutation.reset();
@@ -64,7 +83,7 @@ export function ConfirmedDeleteSettings({
 
   const handleDelete = (event: FormEvent) => {
     event.preventDefault();
-    if (deleteMutation.isPending || !isExactConfirmation) return;
+    if (controlsLocked || !isExactConfirmation) return;
     deleteMutation.mutate(confirmation);
   };
 
@@ -100,12 +119,18 @@ export function ConfirmedDeleteSettings({
               value={confirmation}
               onChange={(event) => setConfirmation(event.target.value)}
               placeholder="Enter confirmation text"
-              disabled={deleteMutation.isPending}
+              disabled={controlsLocked}
               autoFocus
             />
             {deleteMutation.isError && (
               <p className="text-sm text-destructive" role="alert">
-                {structuredErrorMessage(deleteMutation.error, adapter.errorFallback)}
+                {apiErrorMessage(deleteMutation.error, adapter.errorFallback)}
+              </p>
+            )}
+            {destinationFailed && (
+              <p className="text-sm text-destructive" role="alert">
+                The resource was deleted, but the next page could not be opened. Reload to
+                continue.
               </p>
             )}
             <div className="flex gap-2">
@@ -113,16 +138,20 @@ export function ConfirmedDeleteSettings({
                 type="submit"
                 variant="destructive"
                 size="sm"
-                disabled={deleteMutation.isPending || !isExactConfirmation}
+                disabled={controlsLocked || !isExactConfirmation}
               >
-                {deleteMutation.isPending ? adapter.pendingButton : adapter.confirmButton}
+                {deleteMutation.isPending || postDeletePending
+                  ? adapter.pendingButton
+                  : deletionCommitted
+                    ? adapter.deletedButton
+                    : adapter.confirmButton}
               </Button>
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 onClick={cancelConfirmation}
-                disabled={deleteMutation.isPending}
+                disabled={controlsLocked}
               >
                 Cancel
               </Button>
