@@ -197,7 +197,9 @@ export function InviteSettings({ adapter }: { adapter: InviteSettingsAdapter }) 
           <p className="text-sm text-muted-foreground">Loading...</p>
         )}
         {adapter.canList && invitesQuery.isError && (
-          <p className="text-sm text-destructive">Failed to load invites</p>
+          <p className="text-sm text-destructive">
+            {apiErrorMessage(invitesQuery.error, 'Failed to load invites')}
+          </p>
         )}
         {revokeError !== null && (
           <p className="text-sm text-destructive">

@@ -91,13 +91,23 @@ describe('InviteSettings', () => {
     expect(await screen.findByText('No pending invites.')).toBeInTheDocument();
   });
 
-  it('presents a stable list error and does not query without list permission', async () => {
+  it('presents structured and fallback list errors and does not query without list permission', async () => {
+    const structuredFailure = vi
+      .fn()
+      .mockRejectedValue(
+        new ApiError(403, JSON.stringify({ error: { message: 'Invites are unavailable' } })),
+      );
+    const view = renderSettings(adapter({ listInvites: structuredFailure }));
+
+    expect(await screen.findByText('Invites are unavailable')).toBeInTheDocument();
+
+    view.unmount();
     const failedList = vi.fn().mockRejectedValue(new Error('network detail'));
-    const view = renderSettings(adapter({ listInvites: failedList }));
+    const fallbackView = renderSettings(adapter({ listInvites: failedList }));
 
     expect(await screen.findByText('Failed to load invites')).toBeInTheDocument();
 
-    view.unmount();
+    fallbackView.unmount();
     const forbiddenList = vi.fn().mockResolvedValue(invites);
     renderSettings(adapter({ listInvites: forbiddenList, canList: false }));
 
