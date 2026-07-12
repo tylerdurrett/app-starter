@@ -32,6 +32,7 @@ describe('ApiError.parsedMessage', () => {
     ['unparseable text', 'not json'],
     ['a missing error field', JSON.stringify({ message: 'Wrong shape' })],
     ['a non-message error value', JSON.stringify({ error: { code: 'INVALID' } })],
+    ['an empty error message', JSON.stringify({ error: '  ' })],
   ])('returns null for %s', (_case, body) => {
     expect(new api.ApiError(500, body).parsedMessage).toBeNull();
   });

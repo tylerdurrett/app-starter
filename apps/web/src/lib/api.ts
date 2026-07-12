@@ -19,14 +19,14 @@ export class ApiError extends Error {
       if (!parsed || typeof parsed !== 'object' || !('error' in parsed)) return null;
 
       const structuredError = parsed.error;
-      if (typeof structuredError === 'string') return structuredError;
+      if (typeof structuredError === 'string') return structuredError.trim() || null;
       if (
         structuredError &&
         typeof structuredError === 'object' &&
         'message' in structuredError &&
         typeof structuredError.message === 'string'
       ) {
-        return structuredError.message;
+        return structuredError.message.trim() || null;
       }
 
       return null;
