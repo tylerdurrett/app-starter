@@ -43,6 +43,11 @@ describe('queryKeys factory', () => {
       expect(queryKeys.projects('acme')).toEqual(['projects', 'acme']);
     });
 
+    it('keeps the global accessible-project list distinct from every workspace list', () => {
+      expect(queryKeys.accessibleProjects()).toEqual(['accessible-projects']);
+      expect(queryKeys.accessibleProjects()).not.toEqual(queryKeys.projects('accessible-projects'));
+    });
+
     it('scopes a singular project detail by workspace slug and project slug', () => {
       expect(queryKeys.project('acme', 'web')).toEqual(['project', 'acme', 'web']);
     });
@@ -71,6 +76,31 @@ describe('queryKeys factory', () => {
 
     it('scopes projects to their workspace so sibling workspaces do not collide', () => {
       expect(queryKeys.project('acme', 'web')).not.toEqual(queryKeys.project('other', 'web'));
+    });
+
+    it('nests each last-active validation under the base key and its full hint', () => {
+      const hint = { workspaceSlug: 'acme', projectSlug: 'web', projectId: 'project-1' };
+
+      expect(queryKeys.lastActiveProject()).toEqual(['last-active-project']);
+      expect(queryKeys.lastActiveProjectValidation(hint)).toEqual([
+        'last-active-project',
+        'validation',
+        'acme',
+        'web',
+        'project-1',
+      ]);
+      expect(queryKeys.lastActiveProjectValidation(hint).slice(0, 1)).toEqual(
+        queryKeys.lastActiveProject(),
+      );
+    });
+
+    it('does not share validation keys between coherent hints', () => {
+      const projectA = { workspaceSlug: 'acme', projectSlug: 'web', projectId: 'project-a' };
+      const projectB = { workspaceSlug: 'acme', projectSlug: 'web', projectId: 'project-b' };
+
+      expect(queryKeys.lastActiveProjectValidation(projectA)).not.toEqual(
+        queryKeys.lastActiveProjectValidation(projectB),
+      );
     });
   });
 
