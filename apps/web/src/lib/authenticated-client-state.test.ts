@@ -1,132 +1,185 @@
 import { QueryClient } from '@tanstack/react-query';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
+let authenticatedClientOwnerMatches: typeof import('./authenticated-client-state')['authenticatedClientOwnerMatches'];
+let authenticatedClientQueriesEnabled: typeof import('./authenticated-client-state')['authenticatedClientQueriesEnabled'];
 let clearAuthenticatedClientState: typeof import('./authenticated-client-state')['clearAuthenticatedClientState'];
 let establishAuthenticatedClientOwner: typeof import('./authenticated-client-state')['establishAuthenticatedClientOwner'];
+let observeAuthenticatedSession: typeof import('./authenticated-client-state')['observeAuthenticatedSession'];
 let readActiveContext: typeof import('./active-workspace')['readActiveContext'];
 let writeActiveContext: typeof import('./active-workspace')['writeActiveContext'];
 
 beforeAll(async () => {
   vi.stubEnv('VITE_SERVER_URL', 'http://test.local');
-  ({ clearAuthenticatedClientState, establishAuthenticatedClientOwner } = await import(
-    './authenticated-client-state'
-  ));
+  ({
+    authenticatedClientOwnerMatches,
+    authenticatedClientQueriesEnabled,
+    clearAuthenticatedClientState,
+    establishAuthenticatedClientOwner,
+    observeAuthenticatedSession,
+  } = await import('./authenticated-client-state'));
   ({ readActiveContext, writeActiveContext } = await import('./active-workspace'));
 });
 
-afterAll(() => {
-  vi.unstubAllEnvs();
-});
+afterAll(() => vi.unstubAllEnvs());
+afterEach(() => vi.unstubAllGlobals());
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
+function setupStorage() {
+  const store = new Map<string, string>();
+  vi.stubGlobal('window', {
+    localStorage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    },
+  });
+  return store;
+}
 
-describe('clearAuthenticatedClientState', () => {
-  it('evicts all queries and the persisted active context when a session is absent', () => {
-    const store = new Map<string, string>();
-    vi.stubGlobal('window', {
-      localStorage: {
-        getItem: (key: string) => store.get(key) ?? null,
-        setItem: (key: string, value: string) => void store.set(key, value),
-        removeItem: (key: string) => void store.delete(key),
-      },
-    });
+function seedPrivateState(queryClient: QueryClient) {
+  queryClient.setQueryData(['private', 'user-a'], { secret: true });
+  writeActiveContext({ workspaceSlug: 'a', projectSlug: 'private', projectId: 'p-a' });
+}
+
+describe('authenticated client ownership', () => {
+  it('cancels work before evicting queries and the persisted hint', async () => {
+    setupStorage();
     const queryClient = new QueryClient();
-    queryClient.setQueryData(['private', 'user-a'], { secret: true });
-    writeActiveContext({ workspaceSlug: 'a', projectSlug: 'private', projectId: 'p-a' });
+    seedPrivateState(queryClient);
+    const order: string[] = [];
+    vi.spyOn(queryClient, 'cancelQueries').mockImplementation(async () => void order.push('cancel'));
+    vi.spyOn(queryClient, 'clear').mockImplementation(() => void order.push('clear'));
 
-    clearAuthenticatedClientState(queryClient);
+    await clearAuthenticatedClientState(queryClient);
+
+    expect(order).toEqual(['cancel', 'clear']);
+    expect(readActiveContext()).toBeNull();
+  });
+
+  it('evicts once before adopting a different runtime owner', async () => {
+    setupStorage();
+    const queryClient = new QueryClient();
+    await establishAuthenticatedClientOwner(queryClient, 'user-a');
+    seedPrivateState(queryClient);
+    const clear = vi.spyOn(queryClient, 'clear');
+
+    await establishAuthenticatedClientOwner(queryClient, 'user-b');
+    await establishAuthenticatedClientOwner(queryClient, 'user-b');
+
+    expect(clear).toHaveBeenCalledOnce();
+    expect(queryClient.getQueryCache().findAll()).toEqual([]);
+    expect(readActiveContext()).toBeNull();
+  });
+
+  it('pauses query observers for the duration of an owner transition', async () => {
+    setupStorage();
+    const queryClient = new QueryClient();
+    await establishAuthenticatedClientOwner(queryClient, 'user-a');
+    let finishCancellation!: () => void;
+    vi.spyOn(queryClient, 'cancelQueries').mockReturnValue(
+      new Promise<void>((resolve) => (finishCancellation = resolve)),
+    );
+
+    const transition = establishAuthenticatedClientOwner(queryClient, 'user-b');
+    await Promise.resolve();
+    expect(authenticatedClientQueriesEnabled(queryClient)).toBe(false);
+    finishCancellation();
+    await transition;
+
+    expect(authenticatedClientQueriesEnabled(queryClient)).toBe(true);
+  });
+
+  it('preserves a reload only when durable ownership proves the same user', async () => {
+    setupStorage();
+    const previousClient = new QueryClient();
+    await establishAuthenticatedClientOwner(previousClient, 'user-a');
+
+    const reloadedClient = new QueryClient();
+    seedPrivateState(reloadedClient);
+    const clear = vi.spyOn(reloadedClient, 'clear');
+    await establishAuthenticatedClientOwner(reloadedClient, 'user-a');
+
+    expect(clear).not.toHaveBeenCalled();
+    expect(reloadedClient.getQueryData(['private', 'user-a'])).toEqual({ secret: true });
+    expect(readActiveContext()).not.toBeNull();
+  });
+
+  it('clears a reload whose durable owner differs', async () => {
+    setupStorage();
+    const previousClient = new QueryClient();
+    await establishAuthenticatedClientOwner(previousClient, 'user-a');
+
+    const reloadedClient = new QueryClient();
+    seedPrivateState(reloadedClient);
+    await establishAuthenticatedClientOwner(reloadedClient, 'user-b');
+
+    expect(reloadedClient.getQueryCache().findAll()).toEqual([]);
+    expect(readActiveContext()).toBeNull();
+  });
+
+  it('clears an ownerless reload instead of trusting its persisted hint', async () => {
+    setupStorage();
+    const queryClient = new QueryClient();
+    seedPrivateState(queryClient);
+
+    await establishAuthenticatedClientOwner(queryClient, 'user-a');
 
     expect(queryClient.getQueryCache().findAll()).toEqual([]);
     expect(readActiveContext()).toBeNull();
   });
 
-  it('evicts a previous owner once before adopting a different session', () => {
-    const store = new Map<string, string>();
-    vi.stubGlobal('window', {
-      localStorage: {
-        getItem: (key: string) => store.get(key) ?? null,
-        setItem: (key: string, value: string) => void store.set(key, value),
-        removeItem: (key: string) => void store.delete(key),
-      },
-    });
+  it('records explicit sign-out so repeated absent observations do not clear again', async () => {
+    setupStorage();
     const queryClient = new QueryClient();
+    await establishAuthenticatedClientOwner(queryClient, 'user-a');
     const clear = vi.spyOn(queryClient, 'clear');
-    establishAuthenticatedClientOwner(queryClient, 'user-a');
-    queryClient.setQueryData(['private', 'user-a'], { secret: true });
-    writeActiveContext({ workspaceSlug: 'a', projectSlug: 'private', projectId: 'p-a' });
 
-    establishAuthenticatedClientOwner(queryClient, 'user-b');
-    establishAuthenticatedClientOwner(queryClient, 'user-b');
+    await clearAuthenticatedClientState(queryClient, null);
+    await establishAuthenticatedClientOwner(queryClient, null);
 
     expect(clear).toHaveBeenCalledOnce();
-    expect(queryClient.getQueryCache().findAll()).toEqual([]);
-    expect(readActiveContext()).toBeNull();
+    expect(authenticatedClientQueriesEnabled(queryClient)).toBe(false);
   });
 
-  it('keeps state when the observed session still has the same owner', () => {
+  it('converges out-of-order observations on the newest-started session', async () => {
+    setupStorage();
     const queryClient = new QueryClient();
-    establishAuthenticatedClientOwner(queryClient, 'user-a');
-    queryClient.setQueryData(['private', 'user-a'], { secret: true });
+    await establishAuthenticatedClientOwner(queryClient, 'user-a');
+    seedPrivateState(queryClient);
+    let resolveOlder!: (identity: { userId: string }) => void;
+    let resolveNewer!: (identity: { userId: string }) => void;
+    const older = observeAuthenticatedSession(
+      queryClient,
+      () => new Promise((resolve) => (resolveOlder = resolve)),
+    );
+    const newer = observeAuthenticatedSession(
+      queryClient,
+      () => new Promise((resolve) => (resolveNewer = resolve)),
+    );
 
-    establishAuthenticatedClientOwner(queryClient, 'user-a');
+    resolveNewer({ userId: 'user-b' });
+    await expect(newer).resolves.toEqual({ userId: 'user-b' });
+    resolveOlder({ userId: 'user-a' });
 
-    expect(queryClient.getQueryData(['private', 'user-a'])).toEqual({ secret: true });
-  });
-
-  it('evicts an authenticated owner only once when the session becomes absent', () => {
-    const queryClient = new QueryClient();
-    const clear = vi.spyOn(queryClient, 'clear');
-    establishAuthenticatedClientOwner(queryClient, 'user-a');
-    queryClient.setQueryData(['private', 'user-a'], { secret: true });
-
-    establishAuthenticatedClientOwner(queryClient, null);
-    establishAuthenticatedClientOwner(queryClient, null);
-
-    expect(clear).toHaveBeenCalledOnce();
+    await expect(older).resolves.toEqual({ userId: 'user-b' });
+    expect(authenticatedClientOwnerMatches(queryClient, 'user-b')).toBe(true);
     expect(queryClient.getQueryCache().findAll()).toEqual([]);
   });
 
-  it('lets the next boundary adopt an owner after an explicit transition clear', () => {
+  it('makes an explicit transition supersede an older pending observation', async () => {
+    setupStorage();
     const queryClient = new QueryClient();
-    const clear = vi.spyOn(queryClient, 'clear');
-    establishAuthenticatedClientOwner(queryClient, 'user-a');
+    await establishAuthenticatedClientOwner(queryClient, 'user-a');
+    let resolveOlder!: (identity: { userId: string }) => void;
+    const older = observeAuthenticatedSession(
+      queryClient,
+      () => new Promise((resolve) => (resolveOlder = resolve)),
+    );
 
-    clearAuthenticatedClientState(queryClient);
-    establishAuthenticatedClientOwner(queryClient, 'user-b');
+    await clearAuthenticatedClientState(queryClient, 'user-b');
+    resolveOlder({ userId: 'user-a' });
 
-    expect(clear).toHaveBeenCalledOnce();
-  });
-
-  it('clears an ownerless persisted hint once when the first session is absent', () => {
-    const store = new Map<string, string>();
-    vi.stubGlobal('window', {
-      localStorage: {
-        getItem: (key: string) => store.get(key) ?? null,
-        setItem: (key: string, value: string) => void store.set(key, value),
-        removeItem: (key: string) => void store.delete(key),
-      },
-    });
-    const queryClient = new QueryClient();
-    const clear = vi.spyOn(queryClient, 'clear');
-    writeActiveContext({ workspaceSlug: 'a', projectSlug: 'private', projectId: 'p-a' });
-
-    establishAuthenticatedClientOwner(queryClient, null);
-    establishAuthenticatedClientOwner(queryClient, null);
-
-    expect(clear).toHaveBeenCalledOnce();
-    expect(readActiveContext()).toBeNull();
-  });
-
-  it('records an explicit sign-out clear as absent', () => {
-    const queryClient = new QueryClient();
-    const clear = vi.spyOn(queryClient, 'clear');
-    establishAuthenticatedClientOwner(queryClient, 'user-a');
-
-    clearAuthenticatedClientState(queryClient, null);
-    establishAuthenticatedClientOwner(queryClient, null);
-
-    expect(clear).toHaveBeenCalledOnce();
+    await expect(older).resolves.toEqual({ userId: 'user-b' });
+    expect(authenticatedClientOwnerMatches(queryClient, 'user-b')).toBe(true);
   });
 });

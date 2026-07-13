@@ -54,7 +54,7 @@ function RegisterPage() {
         return;
       }
 
-      clearAuthenticatedClientState(queryClient);
+      await clearAuthenticatedClientState(queryClient, response.data!.user.id);
 
       if (redirectTo) {
         await navigate({ to: redirectTo });

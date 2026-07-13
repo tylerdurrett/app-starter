@@ -43,6 +43,7 @@ describe('authenticated flow transitions', () => {
 
     await completeLoginTransition({
       queryClient,
+      userId: 'user-b',
       externalRedirect: true,
       navigate,
       resolveDestination,
@@ -75,6 +76,7 @@ describe('authenticated flow transitions', () => {
 
     await completeLoginTransition({
       queryClient,
+      userId: 'user-b',
       externalRedirect: false,
       navigate,
       resolveDestination,

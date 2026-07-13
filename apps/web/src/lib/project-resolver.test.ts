@@ -150,7 +150,7 @@ describe('resolveProject', () => {
       project({ id: 'user-b-project', slug: 'b-project', workspaceSlug: 'b-workspace' }) as never,
     );
 
-    clearAuthenticatedClientState(queryClient);
+    await clearAuthenticatedClientState(queryClient);
     const target = await resolveProject(queryClient);
 
     expect(readActiveContext()).toBeNull();

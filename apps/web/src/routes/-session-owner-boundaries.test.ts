@@ -18,6 +18,10 @@ vi.mock('../components/nav-rail', () => ({
   NavRail: () => null,
 }));
 
+vi.mock('../components/authenticated-client-boundary', () => ({
+  AuthenticatedClientBoundary: ({ children }: { children: unknown }) => children,
+}));
+
 type Boundary = (options: {
   context: { queryClient: QueryClient };
   search?: { redirectTo?: string };
@@ -45,7 +49,7 @@ afterAll(() => {
   vi.unstubAllEnvs();
 });
 
-function setupUserAState() {
+async function setupUserAState() {
   const store = new Map<string, string>();
   vi.stubGlobal('window', {
     localStorage: {
@@ -58,7 +62,7 @@ function setupUserAState() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  establishAuthenticatedClientOwner(queryClient, 'user-a');
+  await establishAuthenticatedClientOwner(queryClient, 'user-a');
   queryClient.setQueryData(['private', 'user-a'], { secret: true });
   writeActiveContext({ workspaceSlug: 'a', projectSlug: 'private', projectId: 'p-a' });
   return queryClient;
@@ -71,9 +75,17 @@ beforeEach(() => {
 
 describe('getSession route ownership boundaries', () => {
   it('evicts user A before the auth resolver reads private state for user B', async () => {
-    const queryClient = setupUserAState();
+    const queryClient = await setupUserAState();
+    const order: string[] = [];
+    vi.spyOn(queryClient, 'cancelQueries').mockImplementation(async () => void order.push('cancel'));
+    vi.spyOn(queryClient, 'clear').mockImplementation(() => {
+      order.push('clear');
+      queryClient.getQueryCache().clear();
+      queryClient.getMutationCache().clear();
+    });
     mocks.getSession.mockResolvedValue({ data: { user: { id: 'user-b' } } });
     mocks.resolveProject.mockImplementation(async (client: QueryClient) => {
+      expect(order).toEqual(['cancel', 'clear']);
       expect(client.getQueryData(['private', 'user-a'])).toBeUndefined();
       expect(readActiveContext()).toBeNull();
       return { to: '/onboarding/create-workspace' };
@@ -85,7 +97,7 @@ describe('getSession route ownership boundaries', () => {
   });
 
   it('evicts user A at the app guard before user B can use private queries', async () => {
-    const queryClient = setupUserAState();
+    const queryClient = await setupUserAState();
     mocks.getSession.mockResolvedValue({ data: { user: { id: 'user-b' } } });
 
     await appBoundary({ context: { queryClient } });
@@ -100,7 +112,7 @@ describe('getSession route ownership boundaries', () => {
   });
 
   it('keeps cached private state when the app guard observes the same user', async () => {
-    const queryClient = setupUserAState();
+    const queryClient = await setupUserAState();
     const clear = vi.spyOn(queryClient, 'clear');
     mocks.getSession.mockResolvedValue({ data: { user: { id: 'user-a' } } });
 
@@ -112,7 +124,7 @@ describe('getSession route ownership boundaries', () => {
   });
 
   it('lets the auth resolver reuse private state for the same user', async () => {
-    const queryClient = setupUserAState();
+    const queryClient = await setupUserAState();
     const clear = vi.spyOn(queryClient, 'clear');
     mocks.getSession.mockResolvedValue({ data: { user: { id: 'user-a' } } });
     mocks.resolveProject.mockImplementation(async (client: QueryClient) => {
@@ -123,6 +135,28 @@ describe('getSession route ownership boundaries', () => {
     await expect(authBoundary({ context: { queryClient }, search: {} })).rejects.toBeDefined();
 
     expect(clear).not.toHaveBeenCalled();
+    expect(mocks.resolveProject).toHaveBeenCalledOnce();
+  });
+
+  it('prevents an older A response from resolving after a newer B boundary wins', async () => {
+    const queryClient = await setupUserAState();
+    let resolveOlder!: (value: { data: { user: { id: string } } }) => void;
+    let resolveNewer!: (value: { data: { user: { id: string } } }) => void;
+    mocks.getSession
+      .mockImplementationOnce(() => new Promise((resolve) => (resolveOlder = resolve)))
+      .mockImplementationOnce(() => new Promise((resolve) => (resolveNewer = resolve)));
+    mocks.resolveProject.mockImplementation(async (client: QueryClient) => {
+      expect(client.getQueryData(['private', 'user-a'])).toBeUndefined();
+      return { to: '/onboarding/create-workspace' };
+    });
+
+    const olderAuthBoundary = authBoundary({ context: { queryClient }, search: {} });
+    const newerAppBoundary = appBoundary({ context: { queryClient } });
+    resolveNewer({ data: { user: { id: 'user-b' } } });
+    await newerAppBoundary;
+    resolveOlder({ data: { user: { id: 'user-a' } } });
+    await expect(olderAuthBoundary).rejects.toBeDefined();
+
     expect(mocks.resolveProject).toHaveBeenCalledOnce();
   });
 });

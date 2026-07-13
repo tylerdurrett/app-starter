@@ -40,6 +40,7 @@ function LoginPage() {
 
       await completeLoginTransition({
         queryClient,
+        userId: response.data!.user.id,
         externalRedirect: Boolean(response.data?.redirect && response.data?.url),
         redirectTo,
         navigate: (target) => navigate(target),

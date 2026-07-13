@@ -8,6 +8,7 @@ interface NavigationTarget {
 
 interface CompleteLoginTransitionOptions {
   queryClient: QueryClient;
+  userId: string;
   externalRedirect: boolean;
   redirectTo?: string;
   navigate: (target: NavigationTarget) => Promise<unknown> | unknown;
@@ -17,12 +18,13 @@ interface CompleteLoginTransitionOptions {
 /** Clear the previous user's state before any successful login continuation. */
 export async function completeLoginTransition({
   queryClient,
+  userId,
   externalRedirect,
   redirectTo,
   navigate,
   resolveDestination,
 }: CompleteLoginTransitionOptions): Promise<void> {
-  clearAuthenticatedClientState(queryClient);
+  await clearAuthenticatedClientState(queryClient, userId);
 
   // Better Auth already initiated a full-page navigation for this branch.
   if (externalRedirect) return;
@@ -43,6 +45,6 @@ export async function completeSignOutTransition(
 ): Promise<void> {
   const result = await signOut();
   if (result?.error) throw result.error;
-  clearAuthenticatedClientState(queryClient, null);
+  await clearAuthenticatedClientState(queryClient, null);
   await continueAfterSignOut();
 }
