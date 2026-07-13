@@ -5,10 +5,13 @@
   "packageManager": "pnpm@10.6.3",
   "scripts": {
     "build": "turbo run build",
+    "typecheck": "pnpm --filter @repo/web build && turbo run typecheck",
     "dev": "turbo run dev",
     "lint": "turbo run lint",
     "test": "turbo run test",
     "test:setup": "node --test scripts/setup.test.mjs",
+    "test:smoke-production": "node --test scripts/smoke-production.test.mjs",
+    "smoke:production": "node scripts/smoke-production.mjs",
     "hello": "node scripts/setup.mjs",
     "go": "node scripts/setup.mjs --ensure && node scripts/wait-for-db.mjs && pnpm db:migrate && node scripts/free-dev-ports.mjs && turbo run dev",
     "stop": "node scripts/free-dev-ports.mjs",
@@ -21,7 +24,7 @@
     "db:studio": "drizzle-kit studio",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:seed": "tsx scripts/seed.ts"
+    "db:seed": "NODE_OPTIONS='--conditions=development' tsx scripts/seed.ts"
   },
   "devDependencies": {
     "dotenv": "^16.5.0",
