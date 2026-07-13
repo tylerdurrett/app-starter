@@ -14,6 +14,7 @@ import {
   signUp,
 } from './helpers.js';
 import { dropTestDatabase, provisionTestDatabase } from './test-database.js';
+import migrationJournal from '../../../packages/db/drizzle/meta/_journal.json';
 
 const migrationsFolder = resolve(
   import.meta.dirname,
@@ -24,6 +25,7 @@ const migrationsFolder = resolve(
   'db',
   'drizzle',
 );
+const expectedMigrationCount = migrationJournal.entries.length;
 
 const expectedPublicTables = [
   'accounts',
@@ -83,7 +85,7 @@ describe('isolated server database', () => {
       workspacesTable: 'workspaces',
       projectsTable: 'projects',
       migrationsTable: 'drizzle.__drizzle_migrations',
-      migrationCount: 2,
+      migrationCount: expectedMigrationCount,
     });
     expect(databaseState?.currentDatabase).not.toBe(identity.sourceDatabase);
 
@@ -129,22 +131,36 @@ describe('isolated server database', () => {
       userCount: 0,
       workspaceCount: 0,
       projectCount: 0,
-      migrationCount: databaseState?.migrationCount,
+      migrationCount: expectedMigrationCount,
       usersTable: 'users',
     });
+    expect(resetState?.migrationCount).toBe(databaseState?.migrationCount);
   });
 
   it('leaves a disposable source sentinel unchanged through child provision, reset, and drop', async () => {
     const outerIdentity = inject('testDatabase');
-    const source = postgres(outerIdentity.sourceUrl, { max: 1 });
+    const source = postgres(outerIdentity.testUrl, { max: 1 });
+    const sentinel = {
+      id: 'isolation-source-sentinel',
+      email: 'isolation-source-sentinel@test.com',
+      name: 'Isolation Source Sentinel',
+    };
     let child: Awaited<ReturnType<typeof provisionTestDatabase>> | undefined;
 
     try {
-      await source`CREATE TEMP TABLE isolation_source_sentinel (value text NOT NULL)`;
-      await source`INSERT INTO isolation_source_sentinel (value) VALUES ('unchanged')`;
+      const [sourceIdentity] = await source<{ currentDatabase: string }[]>`
+        SELECT current_database() AS "currentDatabase"
+      `;
+      expect(sourceIdentity?.currentDatabase).toBe(outerIdentity.testDatabase);
+      expect(sourceIdentity?.currentDatabase).not.toBe(outerIdentity.sourceDatabase);
+
+      await source`
+        INSERT INTO users (id, email, name)
+        VALUES (${sentinel.id}, ${sentinel.email}, ${sentinel.name})
+      `;
 
       child = await provisionTestDatabase({
-        sourceUrl: outerIdentity.sourceUrl,
+        sourceUrl: outerIdentity.testUrl,
         migrationsFolder,
         nodeEnv: 'test',
       });
@@ -161,7 +177,7 @@ describe('isolated server database', () => {
         `;
         expect(initial).toEqual({
           currentDatabase: child.testDatabase,
-          migrationCount: 2,
+          migrationCount: expectedMigrationCount,
           usersTable: 'users',
         });
         expect(initial?.currentDatabase).not.toBe(child.sourceDatabase);
@@ -190,24 +206,29 @@ describe('isolated server database', () => {
         `;
         expect(reset).toEqual({
           userCount: 0,
-          migrationCount: initial?.migrationCount,
+          migrationCount: expectedMigrationCount,
           usersTable: 'users',
         });
+        expect(reset?.migrationCount).toBe(initial?.migrationCount);
       } finally {
         await childClient.end();
       }
 
       expect(
-        await source<{ value: string }[]>`SELECT value FROM isolation_source_sentinel`,
-      ).toEqual([{ value: 'unchanged' }]);
+        await source<{ id: string; email: string; name: string }[]>`
+          SELECT id, email, name FROM users WHERE id = ${sentinel.id}
+        `,
+      ).toEqual([sentinel]);
 
       await dropTestDatabase(child, { nodeEnv: 'test' });
       const droppedDatabase = child.testDatabase;
       child = undefined;
 
       expect(
-        await source<{ value: string }[]>`SELECT value FROM isolation_source_sentinel`,
-      ).toEqual([{ value: 'unchanged' }]);
+        await source<{ id: string; email: string; name: string }[]>`
+          SELECT id, email, name FROM users WHERE id = ${sentinel.id}
+        `,
+      ).toEqual([sentinel]);
       const [database] = await source<{ exists: boolean }[]>`
         SELECT EXISTS(SELECT FROM pg_database WHERE datname = ${droppedDatabase}) AS "exists"
       `;
@@ -216,7 +237,11 @@ describe('isolated server database', () => {
       try {
         if (child) await dropTestDatabase(child, { nodeEnv: 'test' });
       } finally {
-        await source.end();
+        try {
+          await source`DELETE FROM users WHERE id = ${sentinel.id}`;
+        } finally {
+          await source.end();
+        }
       }
     }
   });
