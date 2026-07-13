@@ -111,6 +111,9 @@ describe('AuthenticatedClientBoundary', () => {
       expect(readActiveContext()).toBeNull();
       return { secret: 'user-b' };
     });
+    mocks.invalidate.mockImplementationOnce(async () => {
+      await establishAuthenticatedClientOwner(queryClient, 'user-b');
+    });
 
     const view = render(
       <QueryClientProvider client={queryClient}>
@@ -134,6 +137,43 @@ describe('AuthenticatedClientBoundary', () => {
     await waitFor(() => expect(screen.getByText('user-b')).toBeInTheDocument());
     expect(mocks.privateRead).toHaveBeenCalledOnce();
     expect(mocks.invalidate).toHaveBeenCalledOnce();
+  });
+
+  it('does not let a fresh stale A hook reclaim a coordinator already owned by B', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    await establishAuthenticatedClientOwner(queryClient, 'user-b');
+    queryClient.setQueryData(['private', 'user-b'], { secret: true });
+    const clear = vi.spyOn(queryClient, 'clear');
+
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AuthenticatedClientBoundary>
+          <PrivateConsumer userId="user-a" />
+        </AuthenticatedClientBoundary>
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByText('user-a')).not.toBeInTheDocument();
+    await Promise.resolve();
+    expect(clear).not.toHaveBeenCalled();
+    expect(mocks.invalidate).not.toHaveBeenCalled();
+    expect(mocks.privateRead).not.toHaveBeenCalled();
+
+    mocks.privateRead.mockResolvedValue({ secret: 'user-b' });
+    mocks.session.data = { user: { id: 'user-b' } };
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <AuthenticatedClientBoundary>
+          <PrivateConsumer userId="user-b" />
+        </AuthenticatedClientBoundary>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByText('user-b')).toBeInTheDocument());
+    expect(clear).not.toHaveBeenCalled();
+    expect(mocks.privateRead).not.toHaveBeenCalled();
   });
 
   it('hides stale user A after a route observation establishes B, then recovers as B', async () => {
@@ -184,6 +224,9 @@ describe('AuthenticatedClientBoundary', () => {
     });
     await establishAuthenticatedClientOwner(queryClient, 'user-a');
     queryClient.setQueryData(['private', 'user-a'], { secret: true });
+    mocks.invalidate.mockImplementationOnce(async () => {
+      await establishAuthenticatedClientOwner(queryClient, null);
+    });
 
     const view = render(
       <QueryClientProvider client={queryClient}>

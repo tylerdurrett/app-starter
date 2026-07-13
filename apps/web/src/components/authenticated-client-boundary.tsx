@@ -4,6 +4,7 @@ import { useRouter } from '@tanstack/react-router';
 import { useSession } from '../lib/auth-client';
 import {
   authenticatedClientOwnerMatches,
+  authenticatedClientOwnerSnapshot,
   establishAuthenticatedClientOwner,
 } from '../lib/authenticated-client-state';
 
@@ -24,6 +25,28 @@ export function AuthenticatedClientBoundary({ children }: { children: ReactNode 
       // session catches up. The render gate below hides this stale identity;
       // do not let it reclaim the client from the newer observation.
       return;
+    }
+
+    const coordinatedOwner = authenticatedClientOwnerSnapshot(queryClient);
+    if (coordinatedOwner.transitioning) return;
+    if (coordinatedOwner.known && coordinatedOwner.owner !== userId) {
+      // A fresh boundary has no proof that its hook value is newer than the
+      // coordinator. A previously validated boundary may ask the route guard
+      // to observe the server only while it still agrees with that coordinator.
+      if (validatedOwner === undefined || validatedOwner !== coordinatedOwner.owner) return;
+
+      let active = true;
+      void router.invalidate().then(async () => {
+        if (!active || !authenticatedClientOwnerMatches(queryClient, userId)) return;
+        if (userId === null) {
+          await router.navigate({ to: '/login' });
+          return;
+        }
+        setValidatedOwner(userId);
+      });
+      return () => {
+        active = false;
+      };
     }
 
     let active = true;

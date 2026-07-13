@@ -5,6 +5,12 @@ const AUTHENTICATED_CLIENT_OWNER_KEY = 'authenticatedClientOwner';
 
 export type SessionIdentity = { userId: string } | null;
 
+export interface AuthenticatedClientOwnerSnapshot {
+  known: boolean;
+  owner: string | null;
+  transitioning: boolean;
+}
+
 interface AuthenticatedClientState {
   generation: number;
   ownerKnown: boolean;
@@ -104,7 +110,19 @@ export function authenticatedClientOwnerMatches(
   owner: string | null,
 ): boolean {
   const state = getClientState(queryClient);
-  return state.ownerKnown && state.owner === owner;
+  return state.ownerKnown && state.owner === owner && !state.transitioning;
+}
+
+/** Read the coordinator without exposing its mutable internal state. */
+export function authenticatedClientOwnerSnapshot(
+  queryClient: QueryClient,
+): AuthenticatedClientOwnerSnapshot {
+  const state = getClientState(queryClient);
+  return {
+    known: state.ownerKnown,
+    owner: state.owner,
+    transitioning: state.transitioning,
+  };
 }
 
 /** Prevent private observers from refetching while an owner transition clears them. */
