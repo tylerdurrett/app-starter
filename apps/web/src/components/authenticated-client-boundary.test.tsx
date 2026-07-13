@@ -134,8 +134,10 @@ describe('AuthenticatedClientBoundary', () => {
     );
     expect(screen.queryByText('user-b')).not.toBeInTheDocument();
 
-    await waitFor(() => expect(screen.getByText('user-b')).toBeInTheDocument());
-    expect(mocks.privateRead).toHaveBeenCalledOnce();
+    await waitFor(() => {
+      expect(screen.getByText('user-b')).toBeInTheDocument();
+      expect(mocks.privateRead).toHaveBeenCalledOnce();
+    });
     expect(mocks.invalidate).toHaveBeenCalledOnce();
   });
 
