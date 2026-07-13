@@ -9,7 +9,7 @@ export {
   getInviteByToken,
   acceptInvite,
 } from './invites.js';
-export type { InviteLifecycleConfig, InviteTokenMeta, ResolveEntity } from './invites.js';
+export type { InviteLifecycleConfig, InviteTokenRecord, ResolveEntity } from './invites.js';
 export { listMembers, removeMember } from './members.js';
 export type { MemberCrudConfig, ResolveMemberEntity } from './members.js';
 export { createWithOwnerMembership } from './create.js';

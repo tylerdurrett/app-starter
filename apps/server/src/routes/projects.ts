@@ -19,7 +19,7 @@ import { listInvites, createInvite, revokeInvite } from '../projects/invites.js'
 import { resolveWorkspaceAndRole } from '../workspaces/service.js';
 import { db, workspaces } from '@repo/db';
 import { eq } from 'drizzle-orm';
-import type { ProjectInvite, ProjectInviteCreateResult } from '@repo/shared';
+import type { ProjectInviteCreateResult } from '@repo/shared';
 
 interface ProjectSlugParams {
   workspaceSlug: string;
@@ -179,29 +179,8 @@ const projectRoutes: FastifyPluginAsync = async (app) => {
         workspaceSlug,
       );
       const inviteUrl = `${config.webOrigin}/invite/project/${token}`;
-      // The shared invite lifecycle types its tables as bare PgTable (#66), so
-      // the returned row is loosely typed; narrow it to the columns we project.
-      const row = invite as unknown as {
-        id: string;
-        email: string;
-        role: string;
-        status: string;
-        expiresAt: Date;
-        createdAt: Date;
-      };
-      // Project onto the shared contract: the raw row omits invitedByName (the
-      // actor created it) and carries internal columns (tokenHash, FKs) that
-      // must not leak to the client.
       const result: ProjectInviteCreateResult = {
-        invite: {
-          id: row.id,
-          email: row.email,
-          role: row.role as ProjectInvite['role'],
-          status: row.status as ProjectInvite['status'],
-          expiresAt: row.expiresAt.toISOString(),
-          createdAt: row.createdAt.toISOString(),
-          invitedByName: user.name,
-        },
+        invite,
         inviteUrl,
       };
       return reply.status(201).send(result);

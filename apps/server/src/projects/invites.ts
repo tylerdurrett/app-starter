@@ -1,7 +1,6 @@
-import { db, projectInvites, projectMemberships, projects, users, workspaces } from '@repo/db';
-import { eq, and } from 'drizzle-orm';
+import { db, projectInvites, projectMemberships, projects, workspaces } from '@repo/db';
+import { eq } from 'drizzle-orm';
 import {
-  ServiceError,
   listInvites as sharedListInvites,
   createInvite as sharedCreateInvite,
   revokeInvite as sharedRevokeInvite,
@@ -12,6 +11,7 @@ import {
 } from '../tenancy/index.js';
 import { resolveProjectAndRole } from './service.js';
 import type { ProjectPermission } from './permissions.js';
+import { projectInviteMetadataSchema, type ProjectInviteMetadata } from '@repo/shared';
 
 /** Token-metadata projection returned by getInviteByToken for the project level. */
 interface ProjectInviteTokenMeta {
@@ -35,6 +35,7 @@ interface ProjectAcceptResult {
 const config: InviteLifecycleConfig<
   ProjectPermission,
   ProjectInviteTokenMeta,
+  ProjectInviteMetadata,
   ProjectAcceptResult
 > = {
   entityLabel: 'project',
@@ -81,40 +82,17 @@ const config: InviteLifecycleConfig<
       .where(eq(projectInvites.tokenHash, tokenHash));
     return invite;
   },
-  // Project revoke: fetch by (id, projectId, status='pending'), throw NOT_FOUND
-  // when missing-or-non-pending, then return the updated row via `.returning()`.
-  async revoke(projectId, inviteId) {
-    const [invite] = await db
-      .select()
-      .from(projectInvites)
-      .where(
-        and(
-          eq(projectInvites.id, inviteId),
-          eq(projectInvites.projectId, projectId),
-          eq(projectInvites.status, 'pending'),
-        ),
-      );
-
-    if (!invite) {
-      throw new ServiceError('NOT_FOUND', 'Invite not found');
-    }
-
-    const [updated] = await db
-      .update(projectInvites)
-      .set({ status: 'revoked' })
-      .where(eq(projectInvites.id, inviteId))
-      .returning();
-
-    return updated;
-  },
-  // Project email guard: compare the raw stored email, folding a missing user
-  // into the FORBIDDEN branch (no distinct NOT_FOUND).
-  async emailGuard(userId, inviteEmail) {
-    const [user] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId));
-    if (!user || user.email !== inviteEmail) {
-      throw new ServiceError('FORBIDDEN', 'This invite is for a different email address');
-    }
-  },
+  buildTokenMetadata: (invite) =>
+    projectInviteMetadataSchema.parse({
+      inviteId: invite.id,
+      email: invite.email,
+      status: invite.status,
+      expiresAt: invite.expiresAt.toISOString(),
+      projectName: invite.projectName,
+      projectSlug: invite.projectSlug,
+      workspaceName: invite.workspaceName,
+      workspaceSlug: invite.workspaceSlug,
+    }),
   membershipEntityId: (invite) => invite.projectId,
   buildAcceptResult: (invite) => ({
     projectId: invite.projectId,
@@ -154,12 +132,8 @@ export function revokeInvite(
   actorUserId: string,
   inviteId: string,
   workspaceSlug: string,
-) {
-  return sharedRevokeInvite(
-    config,
-    resolveProject(slug, actorUserId, workspaceSlug),
-    inviteId,
-  ) as Promise<typeof projectInvites.$inferSelect | undefined>;
+): Promise<void> {
+  return sharedRevokeInvite(config, resolveProject(slug, actorUserId, workspaceSlug), inviteId);
 }
 
 export function getInviteByToken(token: string) {

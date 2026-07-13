@@ -3,7 +3,7 @@ import '../src/config.js';
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { db, workspaces, workspaceMemberships, workspaceInvites, users } from '@repo/db';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 
 import {
@@ -23,6 +23,7 @@ import {
   acceptInvite,
 } from '../src/workspaces/invites.js';
 import { createTestServer, createWorkspaceViaService, signUp } from './helpers.js';
+import { hashToken } from '../src/tenancy/invites.js';
 
 // ---- helpers ----
 
@@ -279,17 +280,67 @@ describe('removeMember', () => {
 
 describe('invites', () => {
   describe('createInvite', () => {
-    it('owner can create invite and receives raw token', async () => {
+    it('returns the exact safe invite and persists only its token hash and entity FK', async () => {
       const ws = await createWorkspaceForTest('Invite Create', aliceId);
       const { invite, token } = await createInvite(ws.slug, aliceId, {
         email: 'invitee@test.com',
       });
 
-      expect(invite.email).toBe('invitee@test.com');
-      expect(invite.status).toBe('pending');
-      expect(invite.role).toBe('member');
-      expect(token).toBeTruthy();
-      expect(invite.tokenHash).not.toBe(token); // hash !== raw token
+      expect(Object.keys(invite).sort()).toEqual([
+        'createdAt',
+        'email',
+        'expiresAt',
+        'id',
+        'invitedByName',
+        'role',
+        'status',
+      ]);
+      expect(invite).toMatchObject({
+        email: 'invitee@test.com',
+        status: 'pending',
+        role: 'member',
+        invitedByName: 'Alice',
+      });
+      expect(new Date(invite.createdAt).toISOString()).toBe(invite.createdAt);
+      expect(new Date(invite.expiresAt).toISOString()).toBe(invite.expiresAt);
+
+      const [stored] = await db
+        .select()
+        .from(workspaceInvites)
+        .where(eq(workspaceInvites.id, invite.id));
+      expect(stored.workspaceId).toBe(ws.id);
+      expect(stored.invitedByUserId).toBe(aliceId);
+      expect(stored.tokenHash).toBe(hashToken(token));
+      expect(stored.tokenHash).not.toBe(token);
+    });
+
+    it('rejects a null-name inviter without inserting an invite', async () => {
+      const ts = Date.now();
+      const inviter = await signUp(app, `nameless-w-${ts}@test.com`, 'Temporary');
+      const ws = await createWorkspaceForTest('Nameless Inviter', inviter.userId);
+      await db.update(users).set({ name: null }).where(eq(users.id, inviter.userId));
+
+      await expect(
+        createInvite(ws.slug, inviter.userId, { email: 'not-created-w@test.com' }),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+
+      const rows = await db
+        .select()
+        .from(workspaceInvites)
+        .where(eq(workspaceInvites.workspaceId, ws.id));
+      expect(rows).toHaveLength(0);
+    });
+
+    it('returns NOT_FOUND for a missing inviter without inserting an invite', async () => {
+      const ws = await createWorkspaceForTest('Missing Inviter', aliceId);
+      await expect(
+        createInvite(ws.slug, 'missing-inviter-id', { email: 'not-created-missing-w@test.com' }),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      const rows = await db
+        .select()
+        .from(workspaceInvites)
+        .where(eq(workspaceInvites.workspaceId, ws.id));
+      expect(rows).toHaveLength(0);
     });
 
     it('normalizes email to lowercase', async () => {
@@ -304,20 +355,23 @@ describe('invites', () => {
     it('rejects if email is already a member', async () => {
       const ws = await createWorkspaceForTest('Invite Already Member', aliceId);
       // Alice's email is already a member (owner)
-      const [alice] = await db.select({ email: users.email }).from(users).where(eq(users.id, aliceId));
+      const [alice] = await db
+        .select({ email: users.email })
+        .from(users)
+        .where(eq(users.id, aliceId));
 
-      await expect(
-        createInvite(ws.slug, aliceId, { email: alice.email }),
-      ).rejects.toMatchObject({ code: 'CONFLICT' });
+      await expect(createInvite(ws.slug, aliceId, { email: alice.email })).rejects.toMatchObject({
+        code: 'CONFLICT',
+      });
     });
 
     it('rejects if pending invite already exists', async () => {
       const ws = await createWorkspaceForTest('Invite Dup', aliceId);
       await createInvite(ws.slug, aliceId, { email: 'dup@test.com' });
 
-      await expect(
-        createInvite(ws.slug, aliceId, { email: 'dup@test.com' }),
-      ).rejects.toMatchObject({ code: 'CONFLICT' });
+      await expect(createInvite(ws.slug, aliceId, { email: 'dup@test.com' })).rejects.toMatchObject(
+        { code: 'CONFLICT' },
+      );
     });
 
     it('member cannot create invite (FORBIDDEN)', async () => {
@@ -361,10 +415,17 @@ describe('invites', () => {
       const ws = await createWorkspaceForTest('Invite Revoke', aliceId);
       const { invite } = await createInvite(ws.slug, aliceId, { email: 'revoke@test.com' });
 
-      await revokeInvite(ws.slug, aliceId, invite.id);
+      await expect(revokeInvite(ws.slug, aliceId, invite.id)).resolves.toBeUndefined();
 
       const list = await listInvites(ws.slug, aliceId);
       expect(list).toHaveLength(0); // revoked invites are excluded from pending list
+    });
+
+    it('revoking a missing invite throws NOT_FOUND', async () => {
+      const ws = await createWorkspaceForTest('Invite Revoke Missing', aliceId);
+      await expect(revokeInvite(ws.slug, aliceId, 'missing-invite')).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
     });
 
     it('revoking a non-pending invite throws CONFLICT', async () => {
@@ -397,6 +458,48 @@ describe('invites', () => {
       expect(summary.email).toBe('token@test.com');
       expect(summary.workspaceName).toBe('Token Lookup');
       expect(summary.status).toBe('pending');
+      expect(Object.keys(summary).sort()).toEqual([
+        'email',
+        'expiresAt',
+        'inviteId',
+        'status',
+        'workspaceName',
+        'workspaceSlug',
+      ]);
+      expect(new Date(summary.expiresAt).toISOString()).toBe(summary.expiresAt);
+    });
+
+    it.each(['accepted', 'revoked'] as const)(
+      'returns safe %s terminal metadata',
+      async (status) => {
+        const ws = await createWorkspaceForTest(`Token ${status} Workspace`, aliceId);
+        const ts = Date.now();
+        const email = `token-${status}-w-${ts}@test.com`;
+        const actor = await signUp(app, email, `Token ${status}`);
+        const { token, invite } = await createInvite(ws.slug, aliceId, { email });
+
+        if (status === 'accepted') await acceptInvite(token, actor.userId);
+        else await revokeInvite(ws.slug, aliceId, invite.id);
+
+        const summary = await getInviteByToken(token);
+        expect(summary.status).toBe(status);
+        expect(Object.keys(summary)).not.toContain('workspaceId');
+      },
+    );
+
+    it('returns safe metadata with an ISO expiry for an expired invite', async () => {
+      const ws = await createWorkspaceForTest('Token Expired Workspace', aliceId);
+      const { token, invite } = await createInvite(ws.slug, aliceId, {
+        email: 'expired-metadata-w@test.com',
+      });
+      await db
+        .update(workspaceInvites)
+        .set({ expiresAt: new Date(Date.now() - 1000) })
+        .where(eq(workspaceInvites.id, invite.id));
+
+      const summary = await getInviteByToken(token);
+      expect(new Date(summary.expiresAt).getTime()).toBeLessThan(Date.now());
+      expect(Object.keys(summary)).not.toContain('tokenHash');
     });
 
     it('throws NOT_FOUND for invalid token', async () => {
@@ -407,12 +510,29 @@ describe('invites', () => {
   });
 
   describe('acceptInvite', () => {
-    it('correct email user can accept and gets membership', async () => {
+    it('normalizes both stored user and invite emails before accepting', async () => {
       const ws = await createWorkspaceForTest('Accept Test', aliceId);
-      const { token } = await createInvite(ws.slug, aliceId, { email: bobEmail });
+      const { token, invite } = await createInvite(ws.slug, aliceId, {
+        email: `  ${bobEmail.toUpperCase()}  `,
+      });
+      await db
+        .update(users)
+        .set({ email: `  ${bobEmail.toUpperCase()}  ` })
+        .where(eq(users.id, bobId));
 
       const result = await acceptInvite(token, bobId);
-      expect(result.workspaceId).toBe(ws.id);
+      expect(result).toEqual({
+        workspaceId: ws.id,
+        workspaceSlug: ws.slug,
+        workspaceName: 'Accept Test',
+      });
+
+      const [storedInvite] = await db
+        .select()
+        .from(workspaceInvites)
+        .where(eq(workspaceInvites.id, invite.id));
+      expect(storedInvite.email).toBe(bobEmail);
+      expect(storedInvite.status).toBe('accepted');
 
       // Verify membership was created
       const members = await listMembers(ws.slug, aliceId);
@@ -422,6 +542,8 @@ describe('invites', () => {
 
       const summary = await getInviteByToken(token);
       expect(summary.status).toBe('accepted');
+
+      await db.update(users).set({ email: bobEmail }).where(eq(users.id, bobId));
     });
 
     it('mismatched email throws FORBIDDEN', async () => {
@@ -431,6 +553,46 @@ describe('invites', () => {
       await expect(acceptInvite(token, bobId)).rejects.toMatchObject({
         code: 'FORBIDDEN',
       });
+    });
+
+    it('missing accepting user throws NOT_FOUND without membership or status changes', async () => {
+      const ws = await createWorkspaceForTest('Accept Missing User', aliceId);
+      const { token, invite } = await createInvite(ws.slug, aliceId, {
+        email: 'missing-user-w@test.com',
+      });
+
+      await expect(acceptInvite(token, 'missing-user-id')).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+      const memberships = await db
+        .select()
+        .from(workspaceMemberships)
+        .where(
+          and(
+            eq(workspaceMemberships.workspaceId, ws.id),
+            eq(workspaceMemberships.userId, 'missing-user-id'),
+          ),
+        );
+      const [stored] = await db
+        .select()
+        .from(workspaceInvites)
+        .where(eq(workspaceInvites.id, invite.id));
+      expect(memberships).toHaveLength(0);
+      expect(stored.status).toBe('pending');
+    });
+
+    it('accepted invite cannot be revoked and remains accepted', async () => {
+      const ws = await createWorkspaceForTest('Accept Then Revoke', aliceId);
+      const ts = Date.now();
+      const email = `accepted-revoke-w-${ts}@test.com`;
+      const actor = await signUp(app, email, 'Accepted Revoke');
+      const { token, invite } = await createInvite(ws.slug, aliceId, { email });
+      await acceptInvite(token, actor.userId);
+
+      await expect(revokeInvite(ws.slug, aliceId, invite.id)).rejects.toMatchObject({
+        code: 'CONFLICT',
+      });
+      expect((await getInviteByToken(token)).status).toBe('accepted');
     });
 
     it('accepting already-accepted invite throws CONFLICT', async () => {

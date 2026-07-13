@@ -2,6 +2,7 @@ import { db, users } from '@repo/db';
 import { eq, and } from 'drizzle-orm';
 import type { PgTable, PgColumn } from 'drizzle-orm/pg-core';
 import { randomUUID, createHash } from 'node:crypto';
+import { inviteBaseSchema, type InviteBase } from '@repo/shared';
 import { ServiceError } from './errors.js';
 import type { TenancyRole } from './roles.js';
 
@@ -14,7 +15,7 @@ export function hashToken(token: string): string {
 }
 
 /** Common invite fields every level's token-metadata projection must include. */
-export interface InviteTokenMeta {
+export interface InviteTokenRecord {
   id: string;
   email: string;
   role: string;
@@ -31,12 +32,13 @@ export type ResolveEntity<Permission extends string> = (
  * Per-level configuration for the shared invite lifecycle. Everything that
  * differs between the workspace and project levels is expressed here — table
  * set, entity-id columns, permission strings, token-metadata projection, and
- * the two divergent guards (revoke + email) — so the five operations below can
- * hold the shared control flow and error semantics exactly once.
+ * accept result — so the five operations below can hold shared control flow
+ * and error semantics exactly once.
  */
 export interface InviteLifecycleConfig<
   Permission extends string,
-  TokenMeta extends InviteTokenMeta,
+  TokenRecord extends InviteTokenRecord,
+  TokenMetadata,
   AcceptResult,
 > {
   /** Label used in conflict messages, e.g. 'workspace' | 'project'. */
@@ -72,26 +74,13 @@ export interface InviteLifecycleConfig<
    * workspace joins `workspaces`; project joins `projects` then the parent
    * `workspaces`. Returns undefined when no invite matches the hash.
    */
-  selectByTokenHash(tokenHash: string): Promise<TokenMeta | undefined>;
-  /**
-   * Revoke an invite. DIVERGENT not-found/conflict semantics and return shape:
-   * workspace fetches by (id, entity) with no status filter then throws
-   * CONFLICT on a non-pending invite and returns void; project fetches by
-   * (id, entity, status='pending'), throws NOT_FOUND when absent, and returns
-   * the updated row via `.returning()`.
-   */
-  revoke(entityId: string, inviteId: string): Promise<unknown>;
-  /**
-   * Verify the accepting user's email matches the invite. DIVERGENT missing-user
-   * handling and normalization: workspace normalizes the stored email and
-   * throws NOT_FOUND for a missing user; project compares raw and folds a
-   * missing user into the FORBIDDEN branch.
-   */
-  emailGuard(userId: string, inviteEmail: string): Promise<void>;
+  selectByTokenHash(tokenHash: string): Promise<TokenRecord | undefined>;
+  /** Project an internal token record onto the level-specific safe contract. */
+  buildTokenMetadata(invite: TokenRecord): TokenMetadata;
   /** The entity id the accepting user becomes a member of. */
-  membershipEntityId(invite: TokenMeta): string;
+  membershipEntityId(invite: TokenRecord): string;
   /** The accept() return projection for this level. */
-  buildAcceptResult(invite: TokenMeta): AcceptResult;
+  buildAcceptResult(invite: TokenRecord): AcceptResult;
 }
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -99,10 +88,11 @@ type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 /** List pending invites for the resolved entity. */
 export async function listInvites<
   Permission extends string,
-  TokenMeta extends InviteTokenMeta,
+  TokenRecord extends InviteTokenRecord,
+  TokenMetadata,
   AcceptResult,
 >(
-  config: InviteLifecycleConfig<Permission, TokenMeta, AcceptResult>,
+  config: InviteLifecycleConfig<Permission, TokenRecord, TokenMetadata, AcceptResult>,
   resolveEntity: ResolveEntity<Permission>,
 ) {
   const { id: entityId } = await resolveEntity(config.permissions.list);
@@ -125,14 +115,27 @@ export async function listInvites<
 /** Create a pending invite after rejecting existing members and duplicate invites. */
 export async function createInvite<
   Permission extends string,
-  TokenMeta extends InviteTokenMeta,
+  TokenRecord extends InviteTokenRecord,
+  TokenMetadata,
   AcceptResult,
 >(
-  config: InviteLifecycleConfig<Permission, TokenMeta, AcceptResult>,
+  config: InviteLifecycleConfig<Permission, TokenRecord, TokenMetadata, AcceptResult>,
   resolveEntity: ResolveEntity<Permission>,
   actorUserId: string,
   { email, role = 'member' }: { email: string; role?: 'manager' | 'member' },
-) {
+): Promise<{ invite: InviteBase; token: string }> {
+  const [inviter] = await db
+    .select({ name: users.name })
+    .from(users)
+    .where(eq(users.id, actorUserId));
+
+  if (!inviter) {
+    throw new ServiceError('NOT_FOUND', 'Inviting user not found');
+  }
+  if (inviter.name === null) {
+    throw new ServiceError('BAD_REQUEST', 'Inviting user must have a name');
+  }
+
   const { id: entityId } = await resolveEntity(config.permissions.invite);
   const normalizedEmail = email.toLowerCase().trim();
 
@@ -181,31 +184,76 @@ export async function createInvite<
     // `PgTable` (no row model). Accepted deliberately — see #66.
   } as typeof config.invites.table.$inferInsert;
 
-  const [invite] = await db.insert(config.invites.table).values(values).returning();
+  const [inserted] = await db.insert(config.invites.table).values(values).returning({
+    id: config.invites.id,
+    email: config.invites.email,
+    role: config.invites.role,
+    status: config.invites.status,
+    expiresAt: config.invites.expiresAt,
+    createdAt: config.invites.createdAt,
+  });
+
+  if (!inserted) {
+    throw new ServiceError('BAD_REQUEST', 'Invite could not be created');
+  }
+
+  const invite = inviteBaseSchema.parse({
+    ...inserted,
+    expiresAt: toIsoString(inserted.expiresAt),
+    createdAt: toIsoString(inserted.createdAt),
+    invitedByName: inviter.name,
+  });
 
   return { invite, token: rawToken };
 }
 
-/** Revoke an invite for the resolved entity (semantics/return shape are DIVERGENT). */
-export async function revokeInvite<
-  Permission extends string,
-  TokenMeta extends InviteTokenMeta,
-  AcceptResult,
->(
-  config: InviteLifecycleConfig<Permission, TokenMeta, AcceptResult>,
-  resolveEntity: ResolveEntity<Permission>,
-  inviteId: string,
-) {
-  const { id: entityId } = await resolveEntity(config.permissions.revoke);
-  return config.revoke(entityId, inviteId);
+function toIsoString(value: unknown): string {
+  if (!(value instanceof Date)) {
+    throw new ServiceError('BAD_REQUEST', 'Invite timestamp is invalid');
+  }
+  return value.toISOString();
 }
 
-/** Load invite metadata by raw token, including for terminal-state invites. */
-export async function getInviteByToken<
+/** Revoke a pending invite for the resolved entity. */
+export async function revokeInvite<
   Permission extends string,
-  TokenMeta extends InviteTokenMeta,
+  TokenRecord extends InviteTokenRecord,
+  TokenMetadata,
   AcceptResult,
->(config: InviteLifecycleConfig<Permission, TokenMeta, AcceptResult>, token: string) {
+>(
+  config: InviteLifecycleConfig<Permission, TokenRecord, TokenMetadata, AcceptResult>,
+  resolveEntity: ResolveEntity<Permission>,
+  inviteId: string,
+): Promise<void> {
+  const { id: entityId } = await resolveEntity(config.permissions.revoke);
+  const [invite] = await db
+    .select({ status: config.invites.status })
+    .from(config.invites.table)
+    .where(and(eq(config.invites.id, inviteId), eq(config.invites.entityId, entityId)));
+
+  if (!invite) {
+    throw new ServiceError('NOT_FOUND', 'Invite not found');
+  }
+  if (invite.status !== 'pending') {
+    throw new ServiceError('CONFLICT', 'Invite is not pending');
+  }
+
+  await db
+    .update(config.invites.table)
+    .set({ status: 'revoked' })
+    .where(eq(config.invites.id, inviteId));
+}
+
+/** Load the internal invite record needed for acceptance. */
+async function loadInviteByToken<
+  Permission extends string,
+  TokenRecord extends InviteTokenRecord,
+  TokenMetadata,
+  AcceptResult,
+>(
+  config: InviteLifecycleConfig<Permission, TokenRecord, TokenMetadata, AcceptResult>,
+  token: string,
+): Promise<TokenRecord> {
   const tokenHash = hashToken(token);
   const invite = await config.selectByTokenHash(tokenHash);
 
@@ -213,23 +261,34 @@ export async function getInviteByToken<
     throw new ServiceError('NOT_FOUND', 'Invite not found');
   }
 
-  // Intentionally return metadata for revoked/accepted/expired invites so the
-  // invite landing page can render an explicit terminal-state card. Acceptance
-  // validity is enforced in acceptInvite below.
   return invite;
+}
+
+/** Load safe invite metadata, including for terminal-state invites. */
+export async function getInviteByToken<
+  Permission extends string,
+  TokenRecord extends InviteTokenRecord,
+  TokenMetadata,
+  AcceptResult,
+>(
+  config: InviteLifecycleConfig<Permission, TokenRecord, TokenMetadata, AcceptResult>,
+  token: string,
+): Promise<TokenMetadata> {
+  return config.buildTokenMetadata(await loadInviteByToken(config, token));
 }
 
 /** Accept an invite: validate state + email, then join in a single transaction. */
 export async function acceptInvite<
   Permission extends string,
-  TokenMeta extends InviteTokenMeta,
+  TokenRecord extends InviteTokenRecord,
+  TokenMetadata,
   AcceptResult,
 >(
-  config: InviteLifecycleConfig<Permission, TokenMeta, AcceptResult>,
+  config: InviteLifecycleConfig<Permission, TokenRecord, TokenMetadata, AcceptResult>,
   token: string,
   actorUserId: string,
 ): Promise<AcceptResult> {
-  const invite = await getInviteByToken(config, token);
+  const invite = await loadInviteByToken(config, token);
 
   if (invite.status === 'accepted') {
     throw new ServiceError('CONFLICT', 'This invite has already been accepted');
@@ -241,8 +300,17 @@ export async function acceptInvite<
     throw new ServiceError('CONFLICT', 'This invite has expired');
   }
 
-  // Verify the accepting user's email matches the invite (DIVERGENT per level).
-  await config.emailGuard(actorUserId, invite.email);
+  const [actor] = await db
+    .select({ email: users.email })
+    .from(users)
+    .where(eq(users.id, actorUserId));
+
+  if (!actor) {
+    throw new ServiceError('NOT_FOUND', 'User not found');
+  }
+  if (normalizeEmail(actor.email) !== normalizeEmail(invite.email)) {
+    throw new ServiceError('FORBIDDEN', 'This invite is for a different email address');
+  }
 
   const entityId = config.membershipEntityId(invite);
 
@@ -278,4 +346,8 @@ export async function acceptInvite<
   });
 
   return config.buildAcceptResult(invite);
+}
+
+function normalizeEmail(email: string): string {
+  return email.toLowerCase().trim();
 }

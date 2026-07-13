@@ -95,7 +95,6 @@ beforeAll(async () => {
   carolCookie = carol.cookie;
   carolId = carol.userId;
 });
-
 afterAll(async () => {
   await closeTestServers();
 });
@@ -799,8 +798,15 @@ describe('POST /api/projects/:projectSlug/invites', () => {
     expect(res.statusCode).toBe(201);
     const body = parseJsonBody(res);
     expect(body.inviteUrl).toMatch(/\/invite\/project\//);
-    expect(body.invite.email).toBe('newuser@example.com');
-    expect(body.invite.role).toBe('manager');
+    expect(body.invite).toMatchObject({
+      email: 'newuser@example.com',
+      role: 'manager',
+      status: 'pending',
+      invitedByName: 'Alice',
+    });
+    expect(Object.keys(body.invite).sort()).toEqual(
+      ['createdAt', 'email', 'expiresAt', 'id', 'invitedByName', 'role', 'status'].sort(),
+    );
   });
 
   it('member cannot create invite', async () => {
