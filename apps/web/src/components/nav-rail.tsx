@@ -1,15 +1,12 @@
 import { useRouterState, useMatch } from '@tanstack/react-router';
+import { useQuery } from '@tanstack/react-query';
 import { LayoutDashboard, Plug } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
 import { TooltipProvider } from '@repo/ui';
 import { NavTile } from './nav-tile';
 import { WorkspaceSwitcher } from './workspace-switcher';
 import { ProjectSwitcher } from './project-switcher';
-import { listWorkspaces } from '../lib/workspaces';
 import { useActiveContext } from '../lib/active-workspace';
-import { type WorkspaceRole } from '../lib/permissions';
-
-type ActiveWorkspace = { slug: string; role: WorkspaceRole };
+import { workspaceQueryOptions, workspacesQueryOptions } from '../lib/workspace-queries';
 
 export function NavRail() {
   const router = useRouterState();
@@ -20,54 +17,35 @@ export function NavRail() {
   // routes like /account (where neither /w/:slug nor /p/:slug are in the URL).
   // The project slug is delivered as a coherent unit paired with the workspace
   // it belongs to (projectWorkspaceSlug) — never crossed with the URL workspace.
+  const activeContext = useActiveContext();
   const {
     workspaceSlug: activeWorkspaceSlug,
     fromUrl,
     projectWorkspaceSlug,
     projectSlug: activeProjectSlug,
-  } = useActiveContext();
+  } = activeContext;
 
-  // Primary source: the workspace route loader. On any /w/$slug/** URL this
-  // gives us { slug, role } synchronously, so the shell never flickers waiting
-  // on a second listWorkspaces() fetch.
+  // The workspace route loader seeds this detail Query. Observe the Query value
+  // rather than the loader snapshot so role/name changes update the shell.
   const workspaceMatch = useMatch({ from: '/_app/w/$workspaceSlug', shouldThrow: false });
-  const loaderWorkspace = workspaceMatch?.loaderData?.workspace;
-  const loaderActive: ActiveWorkspace | null = loaderWorkspace
-    ? { slug: loaderWorkspace.slug, role: loaderWorkspace.role }
-    : null;
+  const routeWorkspaceSlug = workspaceMatch?.params.workspaceSlug ?? null;
+  const workspaceQuery = useQuery({
+    ...workspaceQueryOptions(routeWorkspaceSlug ?? ''),
+    enabled: routeWorkspaceSlug != null,
+  });
 
-  // Fallback for workspace-less routes (e.g. /account, /). We still need to
-  // resolve a default workspace so brand-new users see something in the nav.
-  // Retain the last known value on transient fetch errors so a blip doesn't
-  // wipe the shell.
-  const [fallbackWorkspace, setFallbackWorkspace] = useState<ActiveWorkspace | null>(null);
-  const lastFallbackRef = useRef<ActiveWorkspace | null>(null);
-  const needsFallback = !loaderActive;
-
-  useEffect(() => {
-    if (!needsFallback) return;
-    let cancelled = false;
-    listWorkspaces()
-      .then((workspaces) => {
-        if (cancelled) return;
-        let ws = activeWorkspaceSlug
-          ? workspaces.find((w) => w.slug === activeWorkspaceSlug)
-          : undefined;
-        if (!ws && !fromUrl) ws = workspaces[0];
-        const next = ws ? { slug: ws.slug, role: ws.role } : null;
-        lastFallbackRef.current = next;
-        setFallbackWorkspace(next);
-      })
-      .catch(() => {
-        // Keep last known value — a failed fetch shouldn't strip the nav.
-        if (!cancelled) setFallbackWorkspace(lastFallbackRef.current);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [needsFallback, activeWorkspaceSlug, fromUrl]);
-
-  const activeWorkspace = loaderActive ?? fallbackWorkspace;
+  // Workspace-less routes share this exact list Query with WorkspaceSwitcher.
+  // Query retains prior data through refetches/errors and prevents stale
+  // requests from overwriting newer cache state.
+  const workspacesQuery = useQuery({
+    ...workspacesQueryOptions(),
+    enabled: routeWorkspaceSlug == null,
+  });
+  const fallbackWorkspaces = workspacesQuery.data ?? [];
+  const fallbackWorkspace =
+    fallbackWorkspaces.find((workspace) => workspace.slug === activeWorkspaceSlug) ??
+    (!fromUrl ? fallbackWorkspaces[0] : undefined);
+  const activeWorkspace = routeWorkspaceSlug != null ? workspaceQuery.data : fallbackWorkspace;
 
   // Only highlight a project in the switcher when it actually belongs to the
   // workspace currently on display — otherwise a project remembered from
@@ -121,7 +99,7 @@ export function NavRail() {
           <div className="border-b" />
         </div>
 
-        <WorkspaceSwitcher />
+        <WorkspaceSwitcher activeContext={activeContext} activeWorkspace={activeWorkspace} />
       </nav>
     </TooltipProvider>
   );
