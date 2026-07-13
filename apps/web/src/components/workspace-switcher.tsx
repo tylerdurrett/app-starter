@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { Button, Input } from '@repo/ui';
 import { Plus, Settings, User, LogOut, Check } from 'lucide-react';
@@ -35,13 +35,25 @@ export function WorkspaceSwitcher({ activeContext, activeWorkspace }: WorkspaceS
     fromUrl,
     urlProjectWorkspaceName: contextualName,
   } = activeContext;
-  const workspacesQuery = useQuery(workspacesQueryOptions());
+  const workspaceListQueryOptions = workspacesQueryOptions();
+  const workspacesQuery = useQuery(workspaceListQueryOptions);
   const workspaces = workspacesQuery.data ?? [];
 
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newName, setNewName] = useState('');
-  const [isCreating, setIsCreating] = useState(false);
-  const [createError, setCreateError] = useState('');
+  const createMutation = useMutation({
+    mutationFn: (workspaceName: string) => createWorkspace(workspaceName),
+    onSuccess: async (workspace) => {
+      await queryClient.invalidateQueries({
+        queryKey: workspaceListQueryOptions.queryKey,
+        exact: true,
+      });
+      await navigate({
+        to: '/w/$workspaceSlug',
+        params: { workspaceSlug: workspace.slug },
+      });
+    },
+  });
 
   // When there's no URL context (e.g. /account) and no remembered slug, fall
   // back to the first available workspace so the switcher trigger always shows
@@ -58,8 +70,8 @@ export function WorkspaceSwitcher({ activeContext, activeWorkspace }: WorkspaceS
   const resetCreateForm = useCallback(() => {
     setShowCreateForm(false);
     setNewName('');
-    setCreateError('');
-  }, []);
+    createMutation.reset();
+  }, [createMutation]);
 
   const handleLogout = async () => {
     await completeSignOutTransition(queryClient, signOut, () => {
@@ -81,22 +93,13 @@ export function WorkspaceSwitcher({ activeContext, activeWorkspace }: WorkspaceS
       onClose={resetCreateForm}
     >
       {({ close }) => {
-        const handleCreate = async (e: React.FormEvent) => {
+        const handleCreate = (e: React.FormEvent) => {
           e.preventDefault();
           const trimmed = newName.trim();
-          if (!trimmed) return;
+          if (!trimmed || createMutation.isPending) return;
 
-          setCreateError('');
-          setIsCreating(true);
-          try {
-            const ws = await createWorkspace(trimmed);
-            close();
-            await navigate({ to: '/w/$workspaceSlug', params: { workspaceSlug: ws.slug } });
-          } catch {
-            setCreateError('Failed to create workspace');
-          } finally {
-            setIsCreating(false);
-          }
+          createMutation.reset();
+          createMutation.mutate(trimmed, { onSuccess: close });
         };
 
         return (
@@ -170,27 +173,31 @@ export function WorkspaceSwitcher({ activeContext, activeWorkspace }: WorkspaceS
                   placeholder="Workspace name"
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
-                  disabled={isCreating}
+                  disabled={createMutation.isPending}
                   required
                   autoFocus
                   className="h-8 text-sm"
                 />
-                {createError && <div className="text-xs text-destructive">{createError}</div>}
+                {createMutation.isError && (
+                  <div className="text-xs text-destructive" role="alert">
+                    Failed to create workspace
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <Button
                     type="submit"
                     size="sm"
-                    disabled={isCreating || !newName.trim()}
+                    disabled={createMutation.isPending || !newName.trim()}
                     className="flex-1"
                   >
-                    {isCreating ? 'Creating...' : 'Create'}
+                    {createMutation.isPending ? 'Creating...' : 'Create'}
                   </Button>
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
                     onClick={resetCreateForm}
-                    disabled={isCreating}
+                    disabled={createMutation.isPending}
                   >
                     Cancel
                   </Button>
