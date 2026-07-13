@@ -1,21 +1,14 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import {
-  AUTH_RATE_LIMIT_MAX,
-  GLOBAL_RATE_LIMIT_MAX,
-  buildServer,
-} from '../src/index.js';
+import { describe, expect, it } from 'vitest';
+import { AUTH_RATE_LIMIT_MAX, GLOBAL_RATE_LIMIT_MAX } from '../src/index.js';
 import type { FastifyInstance } from 'fastify';
 
+import { createTestServer, parseResponse } from './helpers.js';
+
 describe('Fastify rate limiting', () => {
-  let app: FastifyInstance | undefined;
-
-  afterEach(async () => {
-    if (app) await app.close();
-    app = undefined;
-  });
-
   it('applies the global per-IP limit using trusted forwarded headers', async () => {
-    app = buildServer({ dbProbe: { ping: async () => true } });
+    const app: FastifyInstance = await createTestServer({
+      buildServer: ({ buildServer }) => buildServer({ dbProbe: { ping: async () => true } }),
+    });
     await app.ready();
 
     const limitedIp = '203.0.113.41';
@@ -47,7 +40,9 @@ describe('Fastify rate limiting', () => {
   });
 
   it('uses the stricter auth limit while still delegating allowed requests to Better Auth', async () => {
-    app = buildServer({ dbProbe: { ping: async () => true } });
+    const app: FastifyInstance = await createTestServer({
+      buildServer: ({ buildServer }) => buildServer({ dbProbe: { ping: async () => true } }),
+    });
     await app.ready();
 
     const limitedIp = '203.0.113.51';
@@ -69,7 +64,7 @@ describe('Fastify rate limiting', () => {
       });
 
       expect(res.statusCode).toBe(401);
-      expect(res.json()).toMatchObject({
+      expect(parseResponse<{ code: string }>(res).body).toMatchObject({
         code: 'INVALID_EMAIL_OR_PASSWORD',
       });
     }
@@ -96,7 +91,7 @@ describe('Fastify rate limiting', () => {
       payload: signInPayload,
     });
     expect(freshIp.statusCode).toBe(401);
-    expect(freshIp.json()).toMatchObject({
+    expect(parseResponse<{ code: string }>(freshIp).body).toMatchObject({
       code: 'INVALID_EMAIL_OR_PASSWORD',
     });
   });
