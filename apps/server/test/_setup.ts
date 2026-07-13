@@ -36,6 +36,32 @@ function throwCollected(errors: unknown[], message: string): void {
   if (errors.length > 1) throw new AggregateError(errors, message);
 }
 
+interface FixtureTeardownOptions {
+  closeServers?: () => Promise<void>;
+  closeDatabase?: () => Promise<void>;
+}
+
+export async function closeServerTestResources({
+  closeServers = closeTestServers,
+  closeDatabase = closeDb,
+}: FixtureTeardownOptions = {}): Promise<void> {
+  const errors: unknown[] = [];
+
+  try {
+    await closeServers();
+  } catch (error) {
+    collectError(errors, error);
+  }
+
+  try {
+    await closeDatabase();
+  } catch (error) {
+    collectError(errors, error);
+  }
+
+  throwCollected(errors, 'Server test fixture teardown failed');
+}
+
 export async function resetTestDatabase(identity = testDatabase): Promise<void> {
   assertSafeTestDatabaseIdentity(identity);
   if (process.env.DATABASE_URL !== identity.testUrl) {
@@ -68,20 +94,4 @@ beforeAll(async () => {
   await resetTestDatabase();
 });
 
-afterAll(async () => {
-  const errors: unknown[] = [];
-
-  try {
-    await closeTestServers();
-  } catch (error) {
-    collectError(errors, error);
-  }
-
-  try {
-    await closeDb();
-  } catch (error) {
-    collectError(errors, error);
-  }
-
-  throwCollected(errors, 'Server test fixture teardown failed');
-});
+afterAll(closeServerTestResources);

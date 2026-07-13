@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 import postgres from 'postgres';
 import { describe, expect, inject, it } from 'vitest';
 
+import { closeServerTestResources } from './_setup.js';
+import { setupTestDatabase } from './global-setup.js';
 import {
   TEST_DATABASE_PREFIX,
   dropTestDatabase,
@@ -49,8 +51,8 @@ describe('test database destructive guards', () => {
   });
 
   it.each([
-    ['token', { runToken: 'wrong' }],
-    ['prefix', { testDatabase: 'postgres' }],
+    ['missing token', { runToken: '' }],
+    ['wrong prefix', { testDatabase: 'postgres' }],
     [
       'source',
       {
@@ -73,6 +75,27 @@ describe('test database destructive guards', () => {
       expect(clientsCreated).toBe(0);
     },
   );
+
+  it('rejects a source database equal to the generated target', async () => {
+    const target = identity();
+    let clientsCreated = 0;
+    const createClient = (() => {
+      clientsCreated += 1;
+      throw new Error('client must not be created');
+    }) as DatabaseClientFactory;
+
+    await expect(
+      dropTestDatabase(
+        {
+          ...target,
+          sourceUrl: target.testUrl,
+          sourceDatabase: target.testDatabase,
+        },
+        { nodeEnv: 'test', createClient },
+      ),
+    ).rejects.toThrow('Test database must be distinct from the source database');
+    expect(clientsCreated).toBe(0);
+  });
 
   it('checks current_database before issuing connection termination or DROP DATABASE', async () => {
     const statements: string[] = [];
@@ -123,6 +146,127 @@ describe('test database destructive guards', () => {
       ],
     });
     expect(statements.some((statement) => statement.startsWith('DROP DATABASE'))).toBe(true);
+  });
+
+  it('rolls back a created database and propagates migration and client-close failures', async () => {
+    const statements: string[] = [];
+    let clientNumber = 0;
+    const createClient: DatabaseClientFactory = () => {
+      const number = clientNumber++;
+      return {
+        async query<Row extends Record<string, unknown>>(statement: string): Promise<Row[]> {
+          statements.push(statement);
+          if (statement.startsWith('SELECT current_database')) {
+            return [
+              {
+                currentDatabase:
+                  number === 1 || number === 2
+                    ? identity().testDatabase
+                    : identity().sourceDatabase,
+              },
+            ] as Row[];
+          }
+          return [];
+        },
+        async migrate() {
+          throw new Error('migration failed');
+        },
+        async close() {
+          if (number === 1) throw new Error('migration client close failed');
+        },
+      };
+    };
+
+    const rejection = provisionTestDatabase({
+      sourceUrl: identity().sourceUrl,
+      migrationsFolder,
+      nodeEnv: 'test',
+      runToken: identity().runToken,
+      createClient,
+    });
+
+    await expect(rejection).rejects.toBeInstanceOf(AggregateError);
+    await expect(rejection).rejects.toMatchObject({
+      errors: [
+        expect.objectContaining({ message: 'migration failed' }),
+        expect.objectContaining({ message: 'migration client close failed' }),
+      ],
+    });
+    expect(statements.some((statement) => statement.startsWith('DROP DATABASE'))).toBe(true);
+  });
+
+  it('propagates both server and shared database shutdown failures', async () => {
+    const rejection = closeServerTestResources({
+      async closeServers() {
+        throw new Error('server close failed');
+      },
+      async closeDatabase() {
+        throw new Error('closeDb failed');
+      },
+    });
+
+    await expect(rejection).rejects.toBeInstanceOf(AggregateError);
+    await expect(rejection).rejects.toMatchObject({
+      errors: [
+        expect.objectContaining({ message: 'server close failed' }),
+        expect.objectContaining({ message: 'closeDb failed' }),
+      ],
+    });
+  });
+
+  it('validates the server environment before provisioning a database', async () => {
+    let provisioned = false;
+
+    await expect(
+      setupTestDatabase({ provide() {} } as never, {
+        async validateEnvironment() {
+          throw new Error('server config import failed');
+        },
+        async provisionDatabase() {
+          provisioned = true;
+          return identity();
+        },
+      }),
+    ).rejects.toThrow('server config import failed');
+    expect(provisioned).toBe(false);
+  });
+
+  it('drops a provisioned database if fixture handoff fails', async () => {
+    const sourceUrl = process.env.DATABASE_URL as string;
+    const sourceDatabase = decodeURIComponent(new URL(sourceUrl).pathname.slice(1));
+    const runToken = 'abcdef0123456789abcdef01';
+    const testDatabase = `${TEST_DATABASE_PREFIX}${runToken}`;
+    const testUrl = new URL(sourceUrl);
+    testUrl.pathname = `/${testDatabase}`;
+    const provisionedIdentity = identity({
+      sourceUrl,
+      sourceDatabase,
+      testUrl: testUrl.toString(),
+      testDatabase,
+      runToken,
+    });
+    const dropped: TestDatabaseIdentity[] = [];
+
+    await expect(
+      setupTestDatabase(
+        {
+          provide() {
+            throw new Error('fixture handoff failed');
+          },
+        } as never,
+        {
+          async validateEnvironment() {},
+          async provisionDatabase() {
+            return provisionedIdentity;
+          },
+          async dropDatabase(droppedIdentity) {
+            dropped.push(droppedIdentity);
+          },
+        },
+      ),
+    ).rejects.toThrow('fixture handoff failed');
+    expect(dropped).toEqual([provisionedIdentity]);
+    expect(process.env.DATABASE_URL).toBe(sourceUrl);
   });
 });
 
