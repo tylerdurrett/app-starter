@@ -52,45 +52,69 @@ afterEach(() => {
 });
 
 describe('resolveProject', () => {
-  it('uses the sequential last-active → Projects → Workspaces order and short-circuits', async () => {
-    const calls: string[] = [];
-    getLastActiveProjectMock.mockImplementation(async () => {
-      calls.push('last-active');
-      return null;
-    });
-    listProjectsMock.mockImplementation(async () => {
-      calls.push('projects');
-      return [project({ slug: 'first-proj', workspaceSlug: 'first-ws', role: 'owner' }) as never];
-    });
-    listWorkspacesMock.mockImplementation(async () => {
-      calls.push('workspaces');
-      return [];
-    });
+  it.each([
+    {
+      state: 'last-active project',
+      lastActive: project({ slug: 'last-proj', workspaceSlug: 'last-ws' }),
+      projects: [],
+      workspaces: [],
+      calls: ['last-active'],
+      target: {
+        to: '/w/$workspaceSlug/p/$projectSlug',
+        params: { workspaceSlug: 'last-ws', projectSlug: 'last-proj' },
+      },
+    },
+    {
+      state: 'first accessible project',
+      lastActive: null,
+      projects: [project({ slug: 'first-proj', workspaceSlug: 'first-ws', role: 'owner' })],
+      workspaces: [],
+      calls: ['last-active', 'projects'],
+      target: {
+        to: '/w/$workspaceSlug/p/$projectSlug',
+        params: { workspaceSlug: 'first-ws', projectSlug: 'first-proj' },
+      },
+    },
+    {
+      state: 'first workspace without a project',
+      lastActive: null,
+      projects: [],
+      workspaces: [{ id: 'w1', name: 'Acme', slug: 'acme', role: 'owner' }],
+      calls: ['last-active', 'projects', 'workspaces'],
+      target: {
+        to: '/w/$workspaceSlug',
+        params: { workspaceSlug: 'acme' },
+      },
+    },
+    {
+      state: 'zero tenancy',
+      lastActive: null,
+      projects: [],
+      workspaces: [],
+      calls: ['last-active', 'projects', 'workspaces'],
+      target: { to: '/onboarding/create-workspace' },
+    },
+  ] as const)(
+    'preserves the ADR-0012 sequential fallback for $state',
+    async ({ lastActive, projects, workspaces, calls: expectedCalls, target }) => {
+      const calls: string[] = [];
+      getLastActiveProjectMock.mockImplementation(async () => {
+        calls.push('last-active');
+        return lastActive as never;
+      });
+      listProjectsMock.mockImplementation(async () => {
+        calls.push('projects');
+        return [...projects] as never;
+      });
+      listWorkspacesMock.mockImplementation(async () => {
+        calls.push('workspaces');
+        return [...workspaces] as never;
+      });
 
-    const target = await resolveProject(createQueryClient());
-
-    expect(target).toEqual({
-      to: '/w/$workspaceSlug/p/$projectSlug',
-      params: { workspaceSlug: 'first-ws', projectSlug: 'first-proj' },
-    });
-    expect(calls).toEqual(['last-active', 'projects']);
-    expect(listWorkspacesMock).not.toHaveBeenCalled();
-  });
-
-  it('stops after a last-active project resolves', async () => {
-    getLastActiveProjectMock.mockResolvedValue(
-      project({ slug: 'last-proj', workspaceSlug: 'last-ws' }) as never,
-    );
-
-    const target = await resolveProject(createQueryClient());
-
-    expect(target).toEqual({
-      to: '/w/$workspaceSlug/p/$projectSlug',
-      params: { workspaceSlug: 'last-ws', projectSlug: 'last-proj' },
-    });
-    expect(listProjectsMock).not.toHaveBeenCalled();
-    expect(listWorkspacesMock).not.toHaveBeenCalled();
-  });
+      await expect(resolveProject(createQueryClient())).resolves.toEqual(target);
+      expect(calls).toEqual(expectedCalls);
+    },
+  );
 
   it('reuses fresh QueryClient data during the same session', async () => {
     const queryClient = createQueryClient();
@@ -102,20 +126,6 @@ describe('resolveProject', () => {
     expect(target.params).toEqual({ workspaceSlug: 'cached-ws', projectSlug: 'cached-project' });
     expect(getLastActiveProjectMock).not.toHaveBeenCalled();
     expect(listProjectsMock).not.toHaveBeenCalled();
-  });
-
-  it('falls back to the first workspace, then onboarding, for zero-tenancy states', async () => {
-    listWorkspacesMock.mockResolvedValueOnce([
-      { id: 'w1', name: 'Acme', slug: 'acme', role: 'owner' } as never,
-    ]);
-    expect(await resolveProject(createQueryClient())).toEqual({
-      to: '/w/$workspaceSlug',
-      params: { workspaceSlug: 'acme' },
-    });
-
-    expect(await resolveProject(createQueryClient())).toEqual({
-      to: '/onboarding/create-workspace',
-    });
   });
 
   it('clears user A state before resolving user B from the network', async () => {

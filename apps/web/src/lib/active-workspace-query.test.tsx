@@ -141,27 +141,38 @@ describe('useActiveContext Query reconciliation', () => {
   });
 
   it.each([
-    ['matching', project(hintA), 'project-a'],
-    ['null', null, null],
-    ['different', project(hintB), null],
+    ['matching', hintA, project(hintA), 'project-a'],
+    ['null', hintA, null, null],
     [
-      'same slug in another workspace',
-      project(hintB, { id: 'project-other-workspace' }),
+      'different project in the same workspace',
+      hintA,
+      project(hintA, { id: 'project-different', slug: 'different' }),
       null,
     ],
-  ] as const)('handles a settled %s server verdict', async (_case, verdict, expectedId) => {
-    writeActiveContext(hintA);
-    mocks.getLastActiveProject.mockResolvedValue(verdict);
+    [
+      'same slug in another workspace when the hint has no id',
+      { ...hintA, projectId: null },
+      project(hintB),
+      null,
+    ],
+  ] as const)(
+    'handles a settled %s server verdict',
+    async (_case, cachedHint, verdict, expectedId) => {
+      writeActiveContext(cachedHint);
+      mocks.getLastActiveProject.mockResolvedValue(verdict);
 
-    render(
-      <Providers client={createClient(0)}>
-        <ContextProbe />
-      </Providers>,
-    );
+      render(
+        <Providers client={createClient(0)}>
+          <ContextProbe />
+        </Providers>,
+      );
 
-    await waitFor(() => expect(readProbe().projectId).toBe(expectedId));
-    expect(readActiveContext()).toEqual(expectedId == null ? null : hintA);
-  });
+      await waitFor(() => expect(readProbe().projectId).toBe(expectedId));
+      await waitFor(() =>
+        expect(readActiveContext()).toEqual(expectedId == null ? null : cachedHint),
+      );
+    },
+  );
 
   it('preserves the hint while its initial validation is pending', () => {
     writeActiveContext(hintA);
