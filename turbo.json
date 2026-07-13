@@ -1,6 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalPassThroughEnv": ["DATABASE_URL", "WSL_DISTRO_NAME", "WSL_INTEROP", "WSLENV"],
+  "globalPassThroughEnv": ["WSL_DISTRO_NAME", "WSL_INTEROP", "WSLENV"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -15,7 +15,8 @@
     },
     "test": {
       "dependsOn": ["^build"],
-      "cache": false
+      "cache": false,
+      "passThroughEnv": ["DATABASE_URL"]
     },
     "typecheck": {}
   }

@@ -128,6 +128,8 @@ describe('test database destructive guards', () => {
 
 describe('test database lifecycle', () => {
   it('creates, migrates, identifies, and drops a real isolated Postgres database', async () => {
+    expect(process.env.NODE_ENV).toBe('test');
+
     const outerIdentity = inject('testDatabase');
     expect(process.env.DATABASE_URL).toBe(outerIdentity.testUrl);
     expect(outerIdentity.sourceUrl).not.toBe(outerIdentity.testUrl);

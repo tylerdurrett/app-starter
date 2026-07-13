@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "NODE_OPTIONS='--conditions=development' tsx watch --include '../../packages/db/src/**/*.ts' --include '../../packages/shared/src/**/*.ts' --include '../../packages/integrations-core/src/**/*.ts' src/main.ts",
     "build": "tsc",
-    "test": "NODE_ENV=test NODE_OPTIONS='--conditions=development' vitest run",
+    "test": "NODE_OPTIONS='--conditions=development' vitest run",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
