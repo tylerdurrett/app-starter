@@ -2,85 +2,67 @@
 import '../src/config.js';
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { buildServer } from '../src/index.js';
-import { db, workspaces, workspaceInvites } from '@repo/db';
-import { eq, inArray } from 'drizzle-orm';
+import { db, workspaceInvites } from '@repo/db';
+import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
+import {
+  closeTestServers,
+  createTestServer,
+  createWorkspaceViaHttp,
+  parseJsonBody,
+  signUp,
+} from './helpers.js';
 
 let app: FastifyInstance;
 
 let aliceCookie: string;
 let bobCookie: string;
-let _bobId: string;
 let bobEmail: string;
-const createdWorkspaceIds: string[] = [];
-
-/** Sign up a user and return their ID + session cookie. */
-async function signUp(email: string, name: string) {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/auth/sign-up/email',
-    headers: { 'content-type': 'application/json' },
-    payload: { email, password: 'password123', name },
-  });
-  const body = JSON.parse(res.body);
-  const setCookie = res.headers['set-cookie'] as string;
-  return { userId: body.user.id, cookie: setCookie.split(';')[0] };
-}
-
-/** Create a workspace via the API and track its ID for cleanup. */
-async function createWs(cookie: string, name: string) {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/workspaces',
-    headers: { 'content-type': 'application/json', cookie },
-    payload: { name },
-  });
-  const body = JSON.parse(res.body);
-  if (body.id) createdWorkspaceIds.push(body.id);
-  return body;
-}
 
 /** Create an invite via the API and return the invite + token + inviteUrl. */
-async function createInviteViaApi(cookie: string, slug: string, email: string, role: 'manager' | 'member' = 'member') {
+async function createInviteViaApi(
+  cookie: string,
+  slug: string,
+  email: string,
+  role: 'manager' | 'member' = 'member',
+) {
   const res = await app.inject({
     method: 'POST',
     url: `/api/workspaces/${slug}/invites`,
     headers: { 'content-type': 'application/json', cookie },
     payload: { email, role },
   });
-  const body = JSON.parse(res.body);
+  const body = parseJsonBody<{
+    invite: { id: string };
+    inviteUrl: string;
+  }>(res);
   // Extract the raw token from the inviteUrl
   const token = body.inviteUrl.split('/invite/workspace/')[1];
   return { invite: body.invite, token, inviteUrl: body.inviteUrl };
 }
 
 beforeAll(async () => {
-  app = buildServer();
+  app = await createTestServer();
   await app.ready();
 
   const ts = Date.now();
-  const alice = await signUp(`alice-winv-${ts}@test.com`, 'Alice');
+  const alice = await signUp(app, `alice-winv-${ts}@test.com`, 'Alice');
   aliceCookie = alice.cookie;
 
   bobEmail = `bob-winv-${ts}@test.com`;
-  const bob = await signUp(bobEmail, 'Bob');
+  const bob = await signUp(app, bobEmail, 'Bob');
   bobCookie = bob.cookie;
-  _bobId = bob.userId;
 });
 
 afterAll(async () => {
-  if (createdWorkspaceIds.length > 0) {
-    await db.delete(workspaces).where(inArray(workspaces.id, createdWorkspaceIds)).catch(() => {});
-  }
-  await app.close();
+  await closeTestServers();
 });
 
 // --- Token-based invite routes ---
 
 describe('GET /api/workspace-invites/:token', () => {
   it('returns safe invite summary without authentication', async () => {
-    const ws = await createWs(aliceCookie, 'Token Fetch');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Token Fetch');
     const { token } = await createInviteViaApi(aliceCookie, ws.slug, 'tokenfetch@test.com');
 
     const res = await app.inject({
@@ -89,7 +71,7 @@ describe('GET /api/workspace-invites/:token', () => {
       // No cookie — unauthenticated
     });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody<Record<string, string>>(res);
     expect(body.email).toBe('tokenfetch@test.com');
     expect(body.workspaceName).toBe('Token Fetch');
     expect(body.workspaceSlug).toBe(ws.slug);
@@ -106,7 +88,7 @@ describe('GET /api/workspace-invites/:token', () => {
   });
 
   it('returns metadata with status=revoked for revoked invite (so the landing page can render an explicit card)', async () => {
-    const ws = await createWs(aliceCookie, 'Revoked');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Revoked');
     const { invite, token } = await createInviteViaApi(aliceCookie, ws.slug, 'revoked@test.com');
 
     // Revoke the invite
@@ -121,7 +103,7 @@ describe('GET /api/workspace-invites/:token', () => {
       url: `/api/workspace-invites/${token}`,
     });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody<Record<string, string>>(res);
     expect(body.status).toBe('revoked');
     expect(body.workspaceName).toBe('Revoked');
   });
@@ -129,7 +111,7 @@ describe('GET /api/workspace-invites/:token', () => {
 
 describe('POST /api/workspace-invites/:token/accept', () => {
   it('accepts invite for email-matching user', async () => {
-    const ws = await createWs(aliceCookie, 'Accept');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Accept');
     const { token } = await createInviteViaApi(aliceCookie, ws.slug, bobEmail, 'manager');
 
     const res = await app.inject({
@@ -138,7 +120,7 @@ describe('POST /api/workspace-invites/:token/accept', () => {
       headers: { cookie: bobCookie },
     });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody<Record<string, string>>(res);
     expect(body.workspaceSlug).toBe(ws.slug);
     expect(body.workspaceName).toBe('Accept');
 
@@ -149,12 +131,12 @@ describe('POST /api/workspace-invites/:token/accept', () => {
       headers: { cookie: bobCookie },
     });
     expect(check.statusCode).toBe(200);
-    const checkBody = JSON.parse(check.body);
+    const checkBody = parseJsonBody<Record<string, string>>(check);
     expect(checkBody.role).toBe('manager');
   });
 
   it('returns 403 for email mismatch', async () => {
-    const ws = await createWs(aliceCookie, 'Mismatch');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Mismatch');
     const { token } = await createInviteViaApi(aliceCookie, ws.slug, 'other@test.com');
 
     const res = await app.inject({
@@ -163,12 +145,12 @@ describe('POST /api/workspace-invites/:token/accept', () => {
       headers: { cookie: bobCookie }, // Bob's email doesn't match
     });
     expect(res.statusCode).toBe(403);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody<{ error: string }>(res);
     expect(body.error).toMatch(/different email/);
   });
 
   it('returns 401 when unauthenticated', async () => {
-    const ws = await createWs(aliceCookie, 'Auth');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Auth');
     const { token } = await createInviteViaApi(aliceCookie, ws.slug, 'auth@test.com');
 
     const res = await app.inject({
@@ -182,9 +164,9 @@ describe('POST /api/workspace-invites/:token/accept', () => {
   it('returns 409 for already accepted invite', async () => {
     const ts = Date.now();
     const carolEmail = `carol-winv-${ts}@test.com`;
-    const carol = await signUp(carolEmail, 'Carol');
+    const carol = await signUp(app, carolEmail, 'Carol');
 
-    const ws = await createWs(aliceCookie, 'Already');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Already');
     const { token } = await createInviteViaApi(aliceCookie, ws.slug, carolEmail);
 
     // Accept once
@@ -201,12 +183,12 @@ describe('POST /api/workspace-invites/:token/accept', () => {
       headers: { cookie: carol.cookie },
     });
     expect(res.statusCode).toBe(409);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody<{ error: string }>(res);
     expect(body.error).toMatch(/already been accepted/);
   });
 
   it('returns 409 when accepting an expired invite', async () => {
-    const ws = await createWs(aliceCookie, 'Expired');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Expired');
     const { invite, token } = await createInviteViaApi(aliceCookie, ws.slug, bobEmail);
 
     // Manually expire the invite in DB
@@ -221,7 +203,7 @@ describe('POST /api/workspace-invites/:token/accept', () => {
       headers: { cookie: bobCookie },
     });
     expect(acceptRes.statusCode).toBe(409);
-    const body = JSON.parse(acceptRes.body);
+    const body = parseJsonBody<{ error: string }>(acceptRes);
     expect(body.error).toMatch(/expired/);
   });
 });
