@@ -1,10 +1,9 @@
 // Ensure .env is loaded before @repo/db reads DATABASE_URL
 import '../src/config.js';
 
-import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from 'vitest';
-import { buildServer } from '../src/index.js';
+import { describe, it, expect, beforeAll, vi, beforeEach, afterEach } from 'vitest';
 import { db, integrations, workspaces, workspaceMemberships } from '@repo/db';
-import { eq, inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 
@@ -17,7 +16,7 @@ import {
   testIntegration,
   ServiceError,
 } from '../src/integrations/service.js';
-import { expectServiceError, parseJsonBody } from './helpers.js';
+import { createTestServer, expectServiceError, signUp } from './helpers.js';
 
 import { isEncrypted } from '../src/integrations/crypto.js';
 
@@ -30,19 +29,6 @@ let memberId: string;
 let nonMemberId: string;
 let workspaceId: string;
 let workspaceSlug: string;
-const createdIntegrationIds: string[] = [];
-
-/** Sign up a user via the auth endpoint and return their ID. */
-async function signUp(email: string, name: string): Promise<string> {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/auth/sign-up/email',
-    headers: { 'content-type': 'application/json' },
-    payload: { email, password: 'password123', name },
-  });
-  const body = parseJsonBody<{ user: { id: string } }>(res);
-  return body.user.id;
-}
 
 /** Create a workspace and add members with specific roles. */
 async function setupWorkspace() {
@@ -87,14 +73,14 @@ async function setupWorkspace() {
 // ---- setup / teardown ----
 
 beforeAll(async () => {
-  app = buildServer();
+  app = await createTestServer();
   await app.ready();
 
   const ts = Date.now();
-  ownerId = await signUp(`owner-int-${ts}@test.com`, 'Owner');
-  managerId = await signUp(`manager-int-${ts}@test.com`, 'Manager');
-  memberId = await signUp(`member-int-${ts}@test.com`, 'Member');
-  nonMemberId = await signUp(`nonmember-int-${ts}@test.com`, 'NonMember');
+  ownerId = (await signUp(app, `owner-int-${ts}@test.com`, 'Owner')).userId;
+  managerId = (await signUp(app, `manager-int-${ts}@test.com`, 'Manager')).userId;
+  memberId = (await signUp(app, `member-int-${ts}@test.com`, 'Member')).userId;
+  nonMemberId = (await signUp(app, `nonmember-int-${ts}@test.com`, 'NonMember')).userId;
 
   await setupWorkspace();
 });
@@ -106,18 +92,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-});
-
-afterAll(async () => {
-  // Clean up integrations
-  if (createdIntegrationIds.length > 0) {
-    await db.delete(integrations).where(inArray(integrations.id, createdIntegrationIds)).catch(() => {});
-  }
-  // Clean up workspace (memberships cascade)
-  if (workspaceId) {
-    await db.delete(workspaces).where(eq(workspaces.id, workspaceId)).catch(() => {});
-  }
-  await app.close();
 });
 
 // ---- tests ----
@@ -133,7 +107,6 @@ describe('createIntegration', () => {
       },
     });
 
-    createdIntegrationIds.push(integration.id);
 
     expect(integration.name).toBe('Test Slack');
     expect(integration.type).toBe('slack');
@@ -188,7 +161,6 @@ describe('listIntegrations', () => {
         signingSecret: '1111111111111111',
       },
     });
-    createdIntegrationIds.push(int1.id);
 
     const int2 = await createIntegration(workspaceSlug, ownerId, {
       type: 'slack',
@@ -198,7 +170,6 @@ describe('listIntegrations', () => {
         signingSecret: '2222222222222222',
       },
     });
-    createdIntegrationIds.push(int2.id);
 
     const list = await listIntegrations(workspaceSlug, ownerId);
 
@@ -236,9 +207,6 @@ describe('listIntegrations', () => {
 
     const list = await listIntegrations(emptyWorkspaceSlug, ownerId);
     expect(list).toEqual([]);
-
-    // Cleanup
-    await db.delete(workspaces).where(eq(workspaces.id, emptyWorkspaceId));
   });
 
   it('flags rows with undecryptable credentials instead of throwing', async () => {
@@ -250,7 +218,6 @@ describe('listIntegrations', () => {
         signingSecret: 'readablesecret123',
       },
     });
-    createdIntegrationIds.push(goodInt.id);
 
     const brokenId = randomUUID();
     const brokenConfig = {
@@ -277,7 +244,6 @@ describe('listIntegrations', () => {
       status: 'error',
       createdByUserId: ownerId,
     });
-    createdIntegrationIds.push(brokenId);
 
     const list = await listIntegrations(workspaceSlug, ownerId);
 
@@ -306,7 +272,6 @@ describe('getIntegration', () => {
         signingSecret: 'gettestsecret123',
       },
     });
-    createdIntegrationIds.push(created.id);
 
     const fetched = await getIntegration(workspaceSlug, created.id, ownerId);
 
@@ -340,7 +305,6 @@ describe('updateIntegration', () => {
         signingSecret: 'updatesecret4567',
       },
     });
-    createdIntegrationIds.push(created.id);
 
     const updated = await updateIntegration(workspaceSlug, created.id, ownerId, {
       name: 'Updated Name',
@@ -360,7 +324,6 @@ describe('updateIntegration', () => {
         signingSecret: 'oldsecret7890123',
       },
     });
-    createdIntegrationIds.push(created.id);
 
     // Mock successful Slack auth.test
     vi.mocked(fetch).mockResolvedValueOnce({
@@ -403,7 +366,6 @@ describe('updateIntegration', () => {
         signingSecret: 'goodsecret111111',
       },
     });
-    createdIntegrationIds.push(created.id);
 
     // Mock failed Slack auth.test
     vi.mocked(fetch).mockResolvedValueOnce({
@@ -436,7 +398,6 @@ describe('testIntegration', () => {
         signingSecret: 'testsuccess33333',
       },
     });
-    createdIntegrationIds.push(created.id);
 
     // Mock successful Slack auth.test
     vi.mocked(fetch).mockResolvedValueOnce({
@@ -494,7 +455,6 @@ describe('testIntegration', () => {
         signingSecret: 'metamask555555555',
       },
     });
-    createdIntegrationIds.push(created.id);
 
     // Mock successful Slack auth.test
     vi.mocked(fetch).mockResolvedValueOnce({
@@ -533,7 +493,6 @@ describe('testIntegration', () => {
         signingSecret: 'testfail44444444',
       },
     });
-    createdIntegrationIds.push(created.id);
 
     // Mock failed Slack auth.test
     vi.mocked(fetch).mockResolvedValueOnce({
@@ -611,7 +570,6 @@ describe('Permission checks', () => {
         signingSecret: 'perm666666666666',
       },
     });
-    createdIntegrationIds.push(created.id);
 
     // Member can list
     const list = await listIntegrations(workspaceSlug, memberId);
@@ -644,7 +602,6 @@ describe('Permission checks', () => {
         signingSecret: 'member8888888888',
       },
     });
-    createdIntegrationIds.push(created.id);
 
     // Member cannot update
     await expect(
@@ -674,7 +631,6 @@ describe('Permission checks', () => {
         signingSecret: 'manager999999999',
       },
     });
-    createdIntegrationIds.push(created.id);
 
     expect(created.id).toBeTruthy();
 
@@ -721,7 +677,6 @@ describe('Permission checks', () => {
         signingSecret: 'nonmember0000000',
       },
     });
-    createdIntegrationIds.push(created.id);
 
     // Non-member gets NOT_FOUND for all operations
     await expect(
@@ -754,7 +709,7 @@ describe('Permission checks', () => {
 
 describe('Multiple integrations', () => {
   it('should support multiple Slack integrations in same workspace', async () => {
-    const slack1 = await createIntegration(workspaceSlug, ownerId, {
+    await createIntegration(workspaceSlug, ownerId, {
       type: 'slack',
       name: 'Slack Team A',
       config: {
@@ -762,9 +717,8 @@ describe('Multiple integrations', () => {
         signingSecret: 'teama11111111111',
       },
     });
-    createdIntegrationIds.push(slack1.id);
 
-    const slack2 = await createIntegration(workspaceSlug, ownerId, {
+    await createIntegration(workspaceSlug, ownerId, {
       type: 'slack',
       name: 'Slack Team B',
       config: {
@@ -772,7 +726,6 @@ describe('Multiple integrations', () => {
         signingSecret: 'teamb22222222222',
       },
     });
-    createdIntegrationIds.push(slack2.id);
 
     const list = await listIntegrations(workspaceSlug, ownerId);
     const slackIntegrations = list.filter(i => i.type === 'slack');

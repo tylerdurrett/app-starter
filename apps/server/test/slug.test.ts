@@ -1,10 +1,9 @@
 // Ensure .env is loaded before @repo/db reads DATABASE_URL
 import '../src/config.js';
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { slugify, ensureUniqueSlug } from '../src/workspaces/slug.js';
 import { db, workspaces, users } from '@repo/db';
-import { eq } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 
 describe('slugify', () => {
@@ -37,8 +36,6 @@ describe('slugify', () => {
 });
 
 describe('ensureUniqueSlug', () => {
-  // Track workspace IDs created during tests so we can clean up
-  const createdIds: string[] = [];
   const testUserId = 'test-user-' + randomUUID();
 
   beforeAll(async () => {
@@ -52,7 +49,6 @@ describe('ensureUniqueSlug', () => {
 
   async function insertWorkspace(slug: string) {
     const id = randomUUID();
-    createdIds.push(id);
     await db.insert(workspaces).values({
       id,
       name: slug,
@@ -60,14 +56,6 @@ describe('ensureUniqueSlug', () => {
       createdByUserId: testUserId,
     });
   }
-
-  // Clean up after all tests in this describe block
-  afterAll(async () => {
-    for (const id of createdIds) {
-      await db.delete(workspaces).where(eq(workspaces.id, id));
-    }
-    await db.delete(users).where(eq(users.id, testUserId));
-  });
 
   it('returns the base slug when no conflict exists', async () => {
     const slug = `unique-test-${Date.now()}`;

@@ -1,23 +1,19 @@
 // Ensure .env is loaded before @repo/db reads DATABASE_URL
 import '../src/config.js';
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { buildServer } from '../src/index.js';
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
   db,
-  workspaces,
   workspaceMemberships,
   projects,
   projectMemberships,
   projectInvites,
   users,
 } from '@repo/db';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 
-import { createWorkspace } from '../src/workspaces/service.js';
 import {
-  createProject,
   updateProject,
   deleteProject,
   listMembers,
@@ -36,6 +32,12 @@ import {
 
 import { requireProjectPermission } from '../src/auth/require-permission.js';
 import type { FastifyRequest } from 'fastify';
+import {
+  createProjectViaService,
+  createTestServer,
+  createWorkspaceViaService,
+  signUp,
+} from './helpers.js';
 
 // ---- helpers ----
 
@@ -45,34 +47,13 @@ let bobId: string;
 let bobEmail: string;
 let workspaceId: string;
 let workspaceSlug: string;
-const createdProjectIds: string[] = [];
-const createdWorkspaceIds: string[] = [];
 
-async function signUp(email: string, name: string): Promise<string> {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/auth/sign-up/email',
-    headers: { 'content-type': 'application/json' },
-    payload: { email, password: 'password123', name },
-  });
-  const body = JSON.parse(res.body);
-  return body.user.id;
+async function createWorkspaceForTest(name: string, ownerUserId: string) {
+  return createWorkspaceViaService(name, ownerUserId);
 }
 
-async function createAndTrackWorkspace(name: string, ownerUserId: string) {
-  const ws = await createWorkspace({ name, ownerUserId });
-  createdWorkspaceIds.push(ws.id);
-  return ws;
-}
-
-async function createAndTrack(name: string, ownerUserId: string, opts?: { wsId?: string }) {
-  const proj = await createProject({
-    name,
-    workspaceId: opts?.wsId ?? workspaceId,
-    ownerUserId,
-  });
-  if (proj) createdProjectIds.push(proj.id);
-  return proj!;
+async function createProjectForTest(name: string, ownerUserId: string, opts?: { wsId?: string }) {
+  return createProjectViaService(name, opts?.wsId ?? workspaceId, ownerUserId);
 }
 
 async function addProjectMember(
@@ -104,41 +85,25 @@ async function addWorkspaceMember(
 // ---- setup / teardown ----
 
 beforeAll(async () => {
-  app = buildServer();
+  app = await createTestServer();
   await app.ready();
 
   const ts = Date.now();
-  aliceId = await signUp(`alice-psvc-${ts}@test.com`, 'Alice');
-  bobId = await signUp(`bob-psvc-${ts}@test.com`, 'Bob');
+  aliceId = (await signUp(app, `alice-psvc-${ts}@test.com`, 'Alice')).userId;
+  bobId = (await signUp(app, `bob-psvc-${ts}@test.com`, 'Bob')).userId;
   bobEmail = `bob-psvc-${ts}@test.com`;
 
   // Projects live under a workspace; create one shared parent workspace for this file.
-  const parent = await createAndTrackWorkspace('Projects Test Parent', aliceId);
+  const parent = await createWorkspaceForTest('Projects Test Parent', aliceId);
   workspaceId = parent.id;
   workspaceSlug = parent.slug;
-});
-
-afterAll(async () => {
-  if (createdProjectIds.length > 0) {
-    await db
-      .delete(projects)
-      .where(inArray(projects.id, createdProjectIds))
-      .catch(() => {});
-  }
-  if (createdWorkspaceIds.length > 0) {
-    await db
-      .delete(workspaces)
-      .where(inArray(workspaces.id, createdWorkspaceIds))
-      .catch(() => {});
-  }
-  await app.close();
 });
 
 // ---- tests ----
 
 describe('createProject', () => {
   it('creates a project with correct slug, workspaceId, and owner membership', async () => {
-    const proj = await createAndTrack('Marketing Site', aliceId);
+    const proj = await createProjectForTest('Marketing Site', aliceId);
 
     expect(proj.name).toBe('Marketing Site');
     expect(proj.slug).toMatch(/^marketing-site/);
@@ -154,30 +119,35 @@ describe('createProject', () => {
   });
 
   it('creates a unique slug when duplicate name exists', async () => {
-    const p1 = await createAndTrack('Duplicate Proj', aliceId);
-    const p2 = await createAndTrack('Duplicate Proj', aliceId);
+    const p1 = await createProjectForTest('Duplicate Proj', aliceId);
+    const p2 = await createProjectForTest('Duplicate Proj', aliceId);
 
     expect(p1.slug).toBe('duplicate-proj');
     expect(p2.slug).toBe('duplicate-proj-2');
   });
 
   it('handles special-character names with a fallback slug', async () => {
-    const proj = await createAndTrack('!@#$%', aliceId);
+    const proj = await createProjectForTest('!@#$%', aliceId);
     expect(proj.slug).toMatch(/^project-/);
   });
 });
 
 describe('updateProject', () => {
   it('owner can update name', async () => {
-    const proj = await createAndTrack('Before Update', aliceId);
-    const updated = await updateProject(proj.slug, aliceId, { name: 'After Update' }, workspaceSlug);
+    const proj = await createProjectForTest('Before Update', aliceId);
+    const updated = await updateProject(
+      proj.slug,
+      aliceId,
+      { name: 'After Update' },
+      workspaceSlug,
+    );
 
     expect(updated.name).toBe('After Update');
     expect(updated.slug).toBe(proj.slug); // slug does not change
   });
 
   it('member cannot update (FORBIDDEN)', async () => {
-    const proj = await createAndTrack('Member Update Proj', aliceId);
+    const proj = await createProjectForTest('Member Update Proj', aliceId);
     await addProjectMember(proj.id, bobId, 'member');
 
     await expect(
@@ -188,7 +158,7 @@ describe('updateProject', () => {
   });
 
   it('manager can update (intermediate access)', async () => {
-    const proj = await createAndTrack('Manager Update Proj', aliceId);
+    const proj = await createProjectForTest('Manager Update Proj', aliceId);
     await addProjectMember(proj.id, bobId, 'manager');
 
     const updated = await updateProject(
@@ -203,7 +173,7 @@ describe('updateProject', () => {
 
 describe('deleteProject', () => {
   it('owner can delete with correct confirmation', async () => {
-    const proj = await createAndTrack('Delete Me Proj', aliceId);
+    const proj = await createProjectForTest('Delete Me Proj', aliceId);
     await deleteProject(proj.slug, aliceId, { confirmation: `Delete ${proj.name}` }, workspaceSlug);
 
     const [gone] = await db.select().from(projects).where(eq(projects.id, proj.id));
@@ -211,14 +181,14 @@ describe('deleteProject', () => {
   });
 
   it('rejects incorrect confirmation', async () => {
-    const proj = await createAndTrack('Keep Me Proj', aliceId);
+    const proj = await createProjectForTest('Keep Me Proj', aliceId);
     await expect(
       deleteProject(proj.slug, aliceId, { confirmation: 'wrong' }, workspaceSlug),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
   });
 
   it('manager cannot delete (FORBIDDEN)', async () => {
-    const proj = await createAndTrack('Manager Delete Proj', aliceId);
+    const proj = await createProjectForTest('Manager Delete Proj', aliceId);
     await addProjectMember(proj.id, bobId, 'manager');
 
     await expect(
@@ -227,7 +197,7 @@ describe('deleteProject', () => {
   });
 
   it('cascade deletes memberships and invites', async () => {
-    const proj = await createAndTrack('Cascade Proj', aliceId);
+    const proj = await createProjectForTest('Cascade Proj', aliceId);
     await createInvite(proj.slug, aliceId, { email: 'cascade-proj@test.com' }, workspaceSlug);
 
     await deleteProject(proj.slug, aliceId, { confirmation: `Delete ${proj.name}` }, workspaceSlug);
@@ -248,7 +218,7 @@ describe('deleteProject', () => {
 
 describe('listMembers', () => {
   it('owner can list members', async () => {
-    const proj = await createAndTrack('Members List Proj', aliceId);
+    const proj = await createProjectForTest('Members List Proj', aliceId);
     const members = await listMembers(proj.slug, aliceId, workspaceSlug);
 
     expect(members).toHaveLength(1);
@@ -257,7 +227,7 @@ describe('listMembers', () => {
   });
 
   it('member can list members', async () => {
-    const proj = await createAndTrack('Members List Mem Proj', aliceId);
+    const proj = await createProjectForTest('Members List Mem Proj', aliceId);
     await addProjectMember(proj.id, bobId, 'member');
 
     const members = await listMembers(proj.slug, bobId, workspaceSlug);
@@ -266,8 +236,8 @@ describe('listMembers', () => {
 
   it('non-member with no workspace override gets NOT_FOUND', async () => {
     // Create a workspace that bob is NOT in, and a project inside it
-    const outsideWs = await createAndTrackWorkspace('Outside Ws', aliceId);
-    const proj = await createAndTrack('Outside Proj', aliceId, { wsId: outsideWs.id });
+    const outsideWs = await createWorkspaceForTest('Outside Ws', aliceId);
+    const proj = await createProjectForTest('Outside Proj', aliceId, { wsId: outsideWs.id });
 
     await expect(listMembers(proj.slug, bobId, outsideWs.slug)).rejects.toMatchObject({
       code: 'NOT_FOUND',
@@ -277,7 +247,7 @@ describe('listMembers', () => {
 
 describe('removeMember', () => {
   it('owner can remove a member', async () => {
-    const proj = await createAndTrack('Remove Test Proj', aliceId);
+    const proj = await createProjectForTest('Remove Test Proj', aliceId);
     await addProjectMember(proj.id, bobId, 'member');
 
     await removeMember(proj.slug, aliceId, bobId, workspaceSlug);
@@ -288,14 +258,14 @@ describe('removeMember', () => {
   });
 
   it('cannot self-remove (CONFLICT)', async () => {
-    const proj = await createAndTrack('Self Remove Proj', aliceId);
+    const proj = await createProjectForTest('Self Remove Proj', aliceId);
     await expect(removeMember(proj.slug, aliceId, aliceId, workspaceSlug)).rejects.toMatchObject({
       code: 'CONFLICT',
     });
   });
 
   it('member cannot remove others (FORBIDDEN)', async () => {
-    const proj = await createAndTrack('Member Remove Forbid Proj', aliceId);
+    const proj = await createProjectForTest('Member Remove Forbid Proj', aliceId);
     await addProjectMember(proj.id, bobId, 'member');
 
     await expect(removeMember(proj.slug, bobId, aliceId, workspaceSlug)).rejects.toMatchObject({
@@ -304,7 +274,7 @@ describe('removeMember', () => {
   });
 
   it('removing non-existent member throws NOT_FOUND', async () => {
-    const proj = await createAndTrack('Remove Ghost Proj', aliceId);
+    const proj = await createProjectForTest('Remove Ghost Proj', aliceId);
     await expect(
       removeMember(proj.slug, aliceId, 'no-such-user', workspaceSlug),
     ).rejects.toMatchObject({
@@ -315,10 +285,10 @@ describe('removeMember', () => {
 
 describe('workspace-scoped slug threading through service wrappers', () => {
   it('updateProject targets the project in the given workspace', async () => {
-    const wsA = await createAndTrackWorkspace('Svc Update Ws A', aliceId);
-    const wsB = await createAndTrackWorkspace('Svc Update Ws B', aliceId);
-    const projA = await createAndTrack('Svc Update Shared', aliceId, { wsId: wsA.id });
-    const projB = await createAndTrack('Svc Update Shared', aliceId, { wsId: wsB.id });
+    const wsA = await createWorkspaceForTest('Svc Update Ws A', aliceId);
+    const wsB = await createWorkspaceForTest('Svc Update Ws B', aliceId);
+    const projA = await createProjectForTest('Svc Update Shared', aliceId, { wsId: wsA.id });
+    const projB = await createProjectForTest('Svc Update Shared', aliceId, { wsId: wsB.id });
 
     const updated = await updateProject(projB.slug, aliceId, { name: 'Renamed In B' }, wsB.slug);
     expect(updated.id).toBe(projB.id);
@@ -329,10 +299,10 @@ describe('workspace-scoped slug threading through service wrappers', () => {
   });
 
   it('deleteProject deletes the project in the given workspace only', async () => {
-    const wsA = await createAndTrackWorkspace('Svc Delete Ws A', aliceId);
-    const wsB = await createAndTrackWorkspace('Svc Delete Ws B', aliceId);
-    const projA = await createAndTrack('Svc Delete Shared', aliceId, { wsId: wsA.id });
-    const projB = await createAndTrack('Svc Delete Shared', aliceId, { wsId: wsB.id });
+    const wsA = await createWorkspaceForTest('Svc Delete Ws A', aliceId);
+    const wsB = await createWorkspaceForTest('Svc Delete Ws B', aliceId);
+    const projA = await createProjectForTest('Svc Delete Shared', aliceId, { wsId: wsA.id });
+    const projB = await createProjectForTest('Svc Delete Shared', aliceId, { wsId: wsB.id });
 
     await deleteProject(projB.slug, aliceId, { confirmation: `Delete ${projB.name}` }, wsB.slug);
 
@@ -343,10 +313,10 @@ describe('workspace-scoped slug threading through service wrappers', () => {
   });
 
   it('listMembers resolves the project in the given workspace', async () => {
-    const wsA = await createAndTrackWorkspace('Svc Members Ws A', aliceId);
-    const wsB = await createAndTrackWorkspace('Svc Members Ws B', aliceId);
-    const projA = await createAndTrack('Svc Members Shared', aliceId, { wsId: wsA.id });
-    const projB = await createAndTrack('Svc Members Shared', aliceId, { wsId: wsB.id });
+    const wsA = await createWorkspaceForTest('Svc Members Ws A', aliceId);
+    const wsB = await createWorkspaceForTest('Svc Members Ws B', aliceId);
+    const projA = await createProjectForTest('Svc Members Shared', aliceId, { wsId: wsA.id });
+    const projB = await createProjectForTest('Svc Members Shared', aliceId, { wsId: wsB.id });
     await addProjectMember(projB.id, bobId, 'member');
 
     const membersB = await listMembers(projB.slug, aliceId, wsB.slug);
@@ -357,10 +327,10 @@ describe('workspace-scoped slug threading through service wrappers', () => {
   });
 
   it('removeMember resolves the project in the given workspace', async () => {
-    const wsA = await createAndTrackWorkspace('Svc Remove Ws A', aliceId);
-    const wsB = await createAndTrackWorkspace('Svc Remove Ws B', aliceId);
-    const projA = await createAndTrack('Svc Remove Shared', aliceId, { wsId: wsA.id });
-    const projB = await createAndTrack('Svc Remove Shared', aliceId, { wsId: wsB.id });
+    const wsA = await createWorkspaceForTest('Svc Remove Ws A', aliceId);
+    const wsB = await createWorkspaceForTest('Svc Remove Ws B', aliceId);
+    const projA = await createProjectForTest('Svc Remove Shared', aliceId, { wsId: wsA.id });
+    const projB = await createProjectForTest('Svc Remove Shared', aliceId, { wsId: wsB.id });
     await addProjectMember(projA.id, bobId, 'member');
     await addProjectMember(projB.id, bobId, 'member');
 
@@ -375,16 +345,13 @@ describe('workspace-scoped slug threading through service wrappers', () => {
 
 describe('last active project', () => {
   it('returns null when the user has no last-active project', async () => {
-    await db
-      .update(users)
-      .set({ lastActiveProjectId: null })
-      .where(eq(users.id, bobId));
+    await db.update(users).set({ lastActiveProjectId: null }).where(eq(users.id, bobId));
 
     await expect(getLastActiveProject(bobId)).resolves.toBeNull();
   });
 
   it('setLastActiveProject updates the user row', async () => {
-    const proj = await createAndTrack('Last Active Set', aliceId);
+    const proj = await createProjectForTest('Last Active Set', aliceId);
     await setLastActiveProject(aliceId, proj.id);
 
     const [user] = await db
@@ -396,7 +363,7 @@ describe('last active project', () => {
   });
 
   it('getLastActiveProject returns the project when set and user has access', async () => {
-    const proj = await createAndTrack('Last Active Get', aliceId);
+    const proj = await createProjectForTest('Last Active Get', aliceId);
     await setLastActiveProject(aliceId, proj.id);
 
     const result = await getLastActiveProject(aliceId);
@@ -414,8 +381,8 @@ describe('last active project', () => {
   });
 
   it('returns null without throwing when the stored project is inaccessible', async () => {
-    const workspace = await createAndTrackWorkspace('Last Active Inaccessible Workspace', aliceId);
-    const proj = await createAndTrack('Last Active Inaccessible Project', aliceId, {
+    const workspace = await createWorkspaceForTest('Last Active Inaccessible Workspace', aliceId);
+    const proj = await createProjectForTest('Last Active Inaccessible Project', aliceId, {
       wsId: workspace.id,
     });
     await setLastActiveProject(bobId, proj.id);
@@ -424,8 +391,8 @@ describe('last active project', () => {
   });
 
   it('uses workspace-derived access for the stored project', async () => {
-    const workspace = await createAndTrackWorkspace('Last Active Workspace Access', aliceId);
-    const proj = await createAndTrack('Last Active Workspace Project', aliceId, {
+    const workspace = await createWorkspaceForTest('Last Active Workspace Access', aliceId);
+    const proj = await createProjectForTest('Last Active Workspace Project', aliceId, {
       wsId: workspace.id,
     });
     await addWorkspaceMember(workspace.id, bobId, 'manager');
@@ -441,8 +408,8 @@ describe('last active project', () => {
   });
 
   it('falls back to workspace access after direct access loss, then returns null', async () => {
-    const workspace = await createAndTrackWorkspace('Last Active Access Loss Workspace', aliceId);
-    const proj = await createAndTrack('Last Active Access Loss Project', aliceId, {
+    const workspace = await createWorkspaceForTest('Last Active Access Loss Workspace', aliceId);
+    const proj = await createProjectForTest('Last Active Access Loss Project', aliceId, {
       wsId: workspace.id,
     });
     await addWorkspaceMember(workspace.id, bobId, 'member');
@@ -451,9 +418,7 @@ describe('last active project', () => {
 
     await db
       .delete(projectMemberships)
-      .where(
-        and(eq(projectMemberships.projectId, proj.id), eq(projectMemberships.userId, bobId)),
-      );
+      .where(and(eq(projectMemberships.projectId, proj.id), eq(projectMemberships.userId, bobId)));
     await expect(getLastActiveProject(bobId)).resolves.toMatchObject({
       id: proj.id,
       role: 'member',
@@ -462,13 +427,16 @@ describe('last active project', () => {
     await db
       .delete(workspaceMemberships)
       .where(
-        and(eq(workspaceMemberships.workspaceId, workspace.id), eq(workspaceMemberships.userId, bobId)),
+        and(
+          eq(workspaceMemberships.workspaceId, workspace.id),
+          eq(workspaceMemberships.userId, bobId),
+        ),
       );
     await expect(getLastActiveProject(bobId)).resolves.toBeNull();
   });
 
   it('returns null after the referenced project is deleted (FK SET NULL)', async () => {
-    const proj = await createAndTrack('Last Active Delete', aliceId);
+    const proj = await createProjectForTest('Last Active Delete', aliceId);
     await setLastActiveProject(aliceId, proj.id);
 
     await deleteProject(proj.slug, aliceId, { confirmation: `Delete ${proj.name}` }, workspaceSlug);
@@ -480,7 +448,7 @@ describe('last active project', () => {
 describe('invites', () => {
   describe('createInvite', () => {
     it('owner can create invite with default member role', async () => {
-      const proj = await createAndTrack('Invite Create Proj', aliceId);
+      const proj = await createProjectForTest('Invite Create Proj', aliceId);
       const { invite, token } = await createInvite(
         proj.slug,
         aliceId,
@@ -498,7 +466,7 @@ describe('invites', () => {
     });
 
     it('accepts manager role on invite creation', async () => {
-      const proj = await createAndTrack('Invite Manager Role', aliceId);
+      const proj = await createProjectForTest('Invite Manager Role', aliceId);
       const { invite } = await createInvite(
         proj.slug,
         aliceId,
@@ -513,7 +481,7 @@ describe('invites', () => {
     });
 
     it('normalizes email to lowercase', async () => {
-      const proj = await createAndTrack('Invite Normalize Proj', aliceId);
+      const proj = await createProjectForTest('Invite Normalize Proj', aliceId);
       const { invite } = await createInvite(
         proj.slug,
         aliceId,
@@ -527,7 +495,7 @@ describe('invites', () => {
     });
 
     it('rejects if email is already a member', async () => {
-      const proj = await createAndTrack('Invite Already Member Proj', aliceId);
+      const proj = await createProjectForTest('Invite Already Member Proj', aliceId);
       const [alice] = await db
         .select({ email: users.email })
         .from(users)
@@ -541,7 +509,7 @@ describe('invites', () => {
     });
 
     it('rejects if pending invite already exists', async () => {
-      const proj = await createAndTrack('Invite Dup Proj', aliceId);
+      const proj = await createProjectForTest('Invite Dup Proj', aliceId);
       await createInvite(proj.slug, aliceId, { email: 'dup-p@test.com' }, workspaceSlug);
 
       await expect(
@@ -550,7 +518,7 @@ describe('invites', () => {
     });
 
     it('member cannot create invite (FORBIDDEN)', async () => {
-      const proj = await createAndTrack('Invite Member Forbid Proj', aliceId);
+      const proj = await createProjectForTest('Invite Member Forbid Proj', aliceId);
       await addProjectMember(proj.id, bobId, 'member');
 
       await expect(
@@ -559,7 +527,7 @@ describe('invites', () => {
     });
 
     it('manager can create invite', async () => {
-      const proj = await createAndTrack('Invite Manager Create', aliceId);
+      const proj = await createProjectForTest('Invite Manager Create', aliceId);
       await addProjectMember(proj.id, bobId, 'manager');
 
       const { invite } = await createInvite(
@@ -576,7 +544,7 @@ describe('invites', () => {
 
   describe('listInvites', () => {
     it('returns pending invites with inviter name', async () => {
-      const proj = await createAndTrack('Invite List Proj', aliceId);
+      const proj = await createProjectForTest('Invite List Proj', aliceId);
       await createInvite(proj.slug, aliceId, { email: 'list-p@test.com' }, workspaceSlug);
 
       const list = await listInvites(proj.slug, aliceId, workspaceSlug);
@@ -587,8 +555,10 @@ describe('invites', () => {
     });
 
     it('non-member with no override gets NOT_FOUND', async () => {
-      const outsideWs = await createAndTrackWorkspace('List NonMem Ws', aliceId);
-      const proj = await createAndTrack('Invite List NonMem Proj', aliceId, { wsId: outsideWs.id });
+      const outsideWs = await createWorkspaceForTest('List NonMem Ws', aliceId);
+      const proj = await createProjectForTest('Invite List NonMem Proj', aliceId, {
+        wsId: outsideWs.id,
+      });
 
       await expect(listInvites(proj.slug, bobId, outsideWs.slug)).rejects.toMatchObject({
         code: 'NOT_FOUND',
@@ -598,7 +568,7 @@ describe('invites', () => {
 
   describe('revokeInvite', () => {
     it('owner can revoke a pending invite', async () => {
-      const proj = await createAndTrack('Invite Revoke Proj', aliceId);
+      const proj = await createProjectForTest('Invite Revoke Proj', aliceId);
       const { invite } = await createInvite(
         proj.slug,
         aliceId,
@@ -613,7 +583,7 @@ describe('invites', () => {
     });
 
     it('member cannot revoke (FORBIDDEN)', async () => {
-      const proj = await createAndTrack('Invite Revoke Forbid Proj', aliceId);
+      const proj = await createProjectForTest('Invite Revoke Forbid Proj', aliceId);
       await addProjectMember(proj.id, bobId, 'member');
       const { invite } = await createInvite(
         proj.slug,
@@ -630,7 +600,7 @@ describe('invites', () => {
 
   describe('getInviteByToken', () => {
     it('returns invite summary for a valid pending token', async () => {
-      const proj = await createAndTrack('Token Lookup Proj', aliceId);
+      const proj = await createProjectForTest('Token Lookup Proj', aliceId);
       const { token } = await createInvite(
         proj.slug,
         aliceId,
@@ -651,7 +621,7 @@ describe('invites', () => {
     });
 
     it('returns metadata with status=revoked for a revoked invite (landing page needs an explicit state)', async () => {
-      const proj = await createAndTrack('Token Revoked Proj', aliceId);
+      const proj = await createProjectForTest('Token Revoked Proj', aliceId);
       const { token, invite } = await createInvite(
         proj.slug,
         aliceId,
@@ -668,7 +638,7 @@ describe('invites', () => {
     });
 
     it('returns metadata with past expiresAt for an expired invite', async () => {
-      const proj = await createAndTrack('Token Expired Proj', aliceId);
+      const proj = await createProjectForTest('Token Expired Proj', aliceId);
       const { token, invite } = await createInvite(
         proj.slug,
         aliceId,
@@ -691,13 +661,8 @@ describe('invites', () => {
 
   describe('acceptInvite', () => {
     it('correct email user can accept and gets membership', async () => {
-      const proj = await createAndTrack('Accept Test Proj', aliceId);
-      const { token } = await createInvite(
-        proj.slug,
-        aliceId,
-        { email: bobEmail },
-        workspaceSlug,
-      );
+      const proj = await createProjectForTest('Accept Test Proj', aliceId);
+      const { token } = await createInvite(proj.slug, aliceId, { email: bobEmail }, workspaceSlug);
 
       const result = await acceptInvite(token, bobId);
       expect(result.projectSlug).toBe(proj.slug);
@@ -712,10 +677,10 @@ describe('invites', () => {
     });
 
     it('manager-role invite grants manager membership on accept', async () => {
-      const proj = await createAndTrack('Accept Manager Proj', aliceId);
+      const proj = await createProjectForTest('Accept Manager Proj', aliceId);
       const ts = Date.now();
       const carolEmail = `carol-accept-mgr-${ts}@test.com`;
-      const carolId = await signUp(carolEmail, 'Carol');
+      const carolId = (await signUp(app, carolEmail, 'Carol')).userId;
 
       const { token } = await createInvite(
         proj.slug,
@@ -735,7 +700,7 @@ describe('invites', () => {
     });
 
     it('mismatched email throws FORBIDDEN', async () => {
-      const proj = await createAndTrack('Accept Mismatch Proj', aliceId);
+      const proj = await createProjectForTest('Accept Mismatch Proj', aliceId);
       const { token } = await createInvite(
         proj.slug,
         aliceId,
@@ -749,13 +714,8 @@ describe('invites', () => {
     });
 
     it('accepting already-accepted invite throws CONFLICT', async () => {
-      const proj = await createAndTrack('Accept Twice Proj', aliceId);
-      const { token } = await createInvite(
-        proj.slug,
-        aliceId,
-        { email: bobEmail },
-        workspaceSlug,
-      );
+      const proj = await createProjectForTest('Accept Twice Proj', aliceId);
+      const { token } = await createInvite(proj.slug, aliceId, { email: bobEmail }, workspaceSlug);
 
       await acceptInvite(token, bobId);
       await expect(acceptInvite(token, bobId)).rejects.toMatchObject({
@@ -764,7 +724,7 @@ describe('invites', () => {
     });
 
     it('accepting revoked invite throws CONFLICT', async () => {
-      const proj = await createAndTrack('Accept Revoked Proj', aliceId);
+      const proj = await createProjectForTest('Accept Revoked Proj', aliceId);
       const { token, invite } = await createInvite(
         proj.slug,
         aliceId,
@@ -779,7 +739,7 @@ describe('invites', () => {
     });
 
     it('accepting expired invite throws CONFLICT', async () => {
-      const proj = await createAndTrack('Accept Expired Proj', aliceId);
+      const proj = await createProjectForTest('Accept Expired Proj', aliceId);
       const { token, invite } = await createInvite(
         proj.slug,
         aliceId,
@@ -800,11 +760,11 @@ describe('invites', () => {
 
   describe('workspace-scoped resolution', () => {
     it('createInvite with a non-matching workspaceSlug resolves NOT_FOUND', async () => {
-      const wsA = await createAndTrackWorkspace('Inv Cross Ws A', aliceId);
-      const wsB = await createAndTrackWorkspace('Inv Cross Ws B', aliceId);
+      const wsA = await createWorkspaceForTest('Inv Cross Ws A', aliceId);
+      const wsB = await createWorkspaceForTest('Inv Cross Ws B', aliceId);
       // Distinct names → distinct slugs, so projA's slug is genuinely absent from wsB.
-      const projA = await createAndTrack('Inv Cross A Only', aliceId, { wsId: wsA.id });
-      await createAndTrack('Inv Cross B Only', aliceId, { wsId: wsB.id });
+      const projA = await createProjectForTest('Inv Cross A Only', aliceId, { wsId: wsA.id });
+      await createProjectForTest('Inv Cross B Only', aliceId, { wsId: wsB.id });
 
       // projA.slug lives in wsA; resolving it under wsB must not find a row.
       await expect(
@@ -813,10 +773,10 @@ describe('invites', () => {
     });
 
     it('createInvite with the matching workspaceSlug resolves the correct project', async () => {
-      const wsA = await createAndTrackWorkspace('Inv Match Ws A', aliceId);
-      const wsB = await createAndTrackWorkspace('Inv Match Ws B', aliceId);
-      const projA = await createAndTrack('Inv Match Shared', aliceId, { wsId: wsA.id });
-      const projB = await createAndTrack('Inv Match Shared', aliceId, { wsId: wsB.id });
+      const wsA = await createWorkspaceForTest('Inv Match Ws A', aliceId);
+      const wsB = await createWorkspaceForTest('Inv Match Ws B', aliceId);
+      const projA = await createProjectForTest('Inv Match Shared', aliceId, { wsId: wsA.id });
+      const projB = await createProjectForTest('Inv Match Shared', aliceId, { wsId: wsB.id });
 
       const { invite } = await createInvite(
         projB.slug,
@@ -831,8 +791,8 @@ describe('invites', () => {
     });
 
     it('createInvite preserves FORBIDDEN semantics when threaded with a workspaceSlug', async () => {
-      const ws = await createAndTrackWorkspace('Inv Forbid Ws', aliceId);
-      const proj = await createAndTrack('Inv Forbid Threaded', aliceId, { wsId: ws.id });
+      const ws = await createWorkspaceForTest('Inv Forbid Ws', aliceId);
+      const proj = await createProjectForTest('Inv Forbid Threaded', aliceId, { wsId: ws.id });
       await addProjectMember(proj.id, bobId, 'member');
 
       await expect(
@@ -841,11 +801,11 @@ describe('invites', () => {
     });
 
     it('listInvites resolves the project in the given workspace', async () => {
-      const wsA = await createAndTrackWorkspace('Inv List Ws A', aliceId);
-      const wsB = await createAndTrackWorkspace('Inv List Ws B', aliceId);
+      const wsA = await createWorkspaceForTest('Inv List Ws A', aliceId);
+      const wsB = await createWorkspaceForTest('Inv List Ws B', aliceId);
       // Distinct names so projA's slug is absent from wsB and the NOT_FOUND is real.
-      const projA = await createAndTrack('Inv List A Only', aliceId, { wsId: wsA.id });
-      const projB = await createAndTrack('Inv List B Only', aliceId, { wsId: wsB.id });
+      const projA = await createProjectForTest('Inv List A Only', aliceId, { wsId: wsA.id });
+      const projB = await createProjectForTest('Inv List B Only', aliceId, { wsId: wsB.id });
       await createInvite(projA.slug, aliceId, { email: 'ina-list@test.com' }, wsA.slug);
       await createInvite(projB.slug, aliceId, { email: 'inb-list@test.com' }, wsB.slug);
 
@@ -854,18 +814,18 @@ describe('invites', () => {
       expect(listB.map((i) => i.email)).not.toContain('ina-list@test.com');
 
       // A slug that does not live in the named workspace resolves NOT_FOUND.
-      await expect(
-        listInvites(projA.slug, aliceId, wsB.slug),
-      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      await expect(listInvites(projA.slug, aliceId, wsB.slug)).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
     });
 
     it('revokeInvite with a non-matching workspaceSlug resolves NOT_FOUND', async () => {
-      const wsA = await createAndTrackWorkspace('Inv Revoke Ws A', aliceId);
-      const wsB = await createAndTrackWorkspace('Inv Revoke Ws B', aliceId);
+      const wsA = await createWorkspaceForTest('Inv Revoke Ws A', aliceId);
+      const wsB = await createWorkspaceForTest('Inv Revoke Ws B', aliceId);
       // Distinct names so the NOT_FOUND comes from the (workspace, slug) project
       // lookup rather than falling through to the invite lookup.
-      const projA = await createAndTrack('Inv Revoke A Only', aliceId, { wsId: wsA.id });
-      await createAndTrack('Inv Revoke B Only', aliceId, { wsId: wsB.id });
+      const projA = await createProjectForTest('Inv Revoke A Only', aliceId, { wsId: wsA.id });
+      await createProjectForTest('Inv Revoke B Only', aliceId, { wsId: wsB.id });
       const { invite } = await createInvite(
         projA.slug,
         aliceId,
@@ -873,9 +833,9 @@ describe('invites', () => {
         wsA.slug,
       );
 
-      await expect(
-        revokeInvite(projA.slug, aliceId, invite.id, wsB.slug),
-      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      await expect(revokeInvite(projA.slug, aliceId, invite.id, wsB.slug)).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
 
       // The invite is untouched and still pending under the correct workspace.
       const list = await listInvites(projA.slug, aliceId, wsA.slug);
@@ -887,20 +847,13 @@ describe('invites', () => {
 describe('requireProjectPermission workspace threading', () => {
   it('carries workspaceSlug to the resolver, selecting the same-slug project in the named workspace', async () => {
     const ts = Date.now();
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/auth/sign-up/email',
-      headers: { 'content-type': 'application/json' },
-      payload: { email: `guard-${ts}@test.com`, password: 'password123', name: 'Guard' },
-    });
-    const guardId = JSON.parse(res.body).user.id;
-    const cookie = (res.headers['set-cookie'] as string).split(';')[0];
+    const { userId: guardId, cookie } = await signUp(app, `guard-${ts}@test.com`, 'Guard');
     const req = { headers: { cookie } } as unknown as FastifyRequest;
 
-    const wsA = await createAndTrackWorkspace('Guard Ws A', guardId);
-    const wsB = await createAndTrackWorkspace('Guard Ws B', guardId);
-    const projA = await createAndTrack('Guard Shared', guardId, { wsId: wsA.id });
-    const projB = await createAndTrack('Guard Shared', guardId, { wsId: wsB.id });
+    const wsA = await createWorkspaceForTest('Guard Ws A', guardId);
+    const wsB = await createWorkspaceForTest('Guard Ws B', guardId);
+    const projA = await createProjectForTest('Guard Shared', guardId, { wsId: wsA.id });
+    const projB = await createProjectForTest('Guard Shared', guardId, { wsId: wsB.id });
 
     const resolved = await requireProjectPermission(req, projB.slug, 'project:read', wsB.slug);
     expect(resolved.project.id).toBe(projB.id);

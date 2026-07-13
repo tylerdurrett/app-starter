@@ -8,10 +8,15 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { db, projectMemberships, workspaces, workspaceMemberships } from '@repo/db';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { buildServer } from '../src/index.js';
-import { createProject } from '../src/projects/service.js';
-import { createWorkspace } from '../src/workspaces/service.js';
 import { registerListProjectsTool } from '../src/mcp/tools/list-projects.js';
+import {
+  closeTestServers,
+  createProjectViaService,
+  createTestServer,
+  createWorkspaceViaService,
+  signUp,
+  trackTestServer,
+} from './helpers.js';
 
 interface ProjectToolContent {
   projects: Array<Record<string, unknown>>;
@@ -38,27 +43,13 @@ const canonicalProjectKeys = [
 let app: FastifyInstance;
 
 async function signUpWithoutPersonalWorkspace(label: string): Promise<string> {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/auth/sign-up/email',
-    headers: { 'content-type': 'application/json' },
-    payload: {
-      email: `mcp-projects-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@test.com`,
-      password: 'password123',
-      name: `MCP ${label}`,
-    },
-  });
-  const userId = JSON.parse(res.body).user.id as string;
+  const { userId } = await signUp(
+    app,
+    `mcp-projects-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@test.com`,
+    `MCP ${label}`,
+  );
   await db.delete(workspaces).where(eq(workspaces.createdByUserId, userId));
   return userId;
-}
-
-async function createWs(name: string, ownerUserId: string) {
-  return createWorkspace({ name, ownerUserId });
-}
-
-async function createProj(name: string, workspaceId: string, ownerUserId: string) {
-  return (await createProject({ name, workspaceId, ownerUserId }))!;
 }
 
 async function addWorkspaceMember(
@@ -88,42 +79,46 @@ async function addProjectMember(
 }
 
 async function createTestClient(authCtx: { userId: string; scopes: string[] }) {
-  const server = new McpServer({ name: 'test', version: '0.0.1' }, { capabilities: { tools: {} } });
+  const server = trackTestServer(
+    new McpServer({ name: 'test', version: '0.0.1' }, { capabilities: { tools: {} } }),
+  );
   registerListProjectsTool(server, authCtx);
 
-  const client = new Client({ name: 'test-client', version: '0.0.1' });
+  const client = trackTestServer(new Client({ name: 'test-client', version: '0.0.1' }));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-  return {
-    client,
-    cleanup: async () => {
-      await client.close();
-      await server.close();
-    },
-  };
+  return client;
 }
 
 beforeAll(async () => {
-  app = buildServer();
+  app = await createTestServer();
   await app.ready();
 });
 
 afterAll(async () => {
-  await app.close();
+  await closeTestServers();
 });
 
 describe('registerListProjectsTool', () => {
   it('returns canonical real-DB projects and preserves effective-role precedence', async () => {
     const actorId = await signUpWithoutPersonalWorkspace('real-db-actor');
     const ownerId = await signUpWithoutPersonalWorkspace('real-db-owner');
-    const workspace = await createWs('MCP Real DB Workspace', ownerId);
-    const directProject = await createProj('MCP Direct Project', workspace.id, ownerId);
-    const inheritedProject = await createProj('MCP Inherited Project', workspace.id, ownerId);
+    const workspace = await createWorkspaceViaService('MCP Real DB Workspace', ownerId);
+    const directProject = await createProjectViaService(
+      'MCP Direct Project',
+      workspace.id,
+      ownerId,
+    );
+    const inheritedProject = await createProjectViaService(
+      'MCP Inherited Project',
+      workspace.id,
+      ownerId,
+    );
     await addWorkspaceMember(workspace.id, actorId, 'manager');
     await addProjectMember(directProject.id, actorId, 'member');
 
-    const { client, cleanup } = await createTestClient({
+    const client = await createTestClient({
       userId: actorId,
       scopes: ['openid', 'projects:read'],
     });
@@ -160,22 +155,20 @@ describe('registerListProjectsTool', () => {
     expect((result.content as Array<{ text: string }>)[0].text).toContain(
       `'${directProject.name}' (${workspace.name}, member)`,
     );
-
-    await cleanup();
   });
 
   it('filters direct-only access by workspace without leaking siblings', async () => {
     const actorId = await signUpWithoutPersonalWorkspace('filtered-actor');
     const ownerId = await signUpWithoutPersonalWorkspace('filtered-owner');
-    const workspaceA = await createWs('MCP Filter Workspace A', ownerId);
-    const workspaceB = await createWs('MCP Filter Workspace B', ownerId);
-    const projectA = await createProj('MCP Filter Project A', workspaceA.id, ownerId);
-    const siblingA = await createProj('MCP Filter Sibling A', workspaceA.id, ownerId);
-    const projectB = await createProj('MCP Filter Project B', workspaceB.id, ownerId);
+    const workspaceA = await createWorkspaceViaService('MCP Filter Workspace A', ownerId);
+    const workspaceB = await createWorkspaceViaService('MCP Filter Workspace B', ownerId);
+    const projectA = await createProjectViaService('MCP Filter Project A', workspaceA.id, ownerId);
+    const siblingA = await createProjectViaService('MCP Filter Sibling A', workspaceA.id, ownerId);
+    const projectB = await createProjectViaService('MCP Filter Project B', workspaceB.id, ownerId);
     await addProjectMember(projectA.id, actorId, 'manager');
     await addProjectMember(projectB.id, actorId, 'member');
 
-    const { client, cleanup } = await createTestClient({
+    const client = await createTestClient({
       userId: actorId,
       scopes: ['projects:read'],
     });
@@ -192,13 +185,11 @@ describe('registerListProjectsTool', () => {
       workspaceSlug: workspaceA.slug,
       role: 'manager',
     });
-
-    await cleanup();
   });
 
   it('returns grouped empty results when the actor has no accessible projects', async () => {
     const actorId = await signUpWithoutPersonalWorkspace('empty-actor');
-    const { client, cleanup } = await createTestClient({
+    const client = await createTestClient({
       userId: actorId,
       scopes: ['projects:read'],
     });
@@ -207,11 +198,10 @@ describe('registerListProjectsTool', () => {
 
     expect(result.structuredContent).toEqual({ projects: [], workspaces: [] });
     expect(result.content).toEqual([{ type: 'text', text: 'No accessible projects found.' }]);
-    await cleanup();
   });
 
   it('rejects calls missing projects:read scope', async () => {
-    const { client, cleanup } = await createTestClient({
+    const client = await createTestClient({
       userId: 'scope-only-user',
       scopes: ['openid', 'workspaces:read'],
     });
@@ -222,6 +212,5 @@ describe('registerListProjectsTool', () => {
     expect((result.content as Array<{ text: string }>)[0].text).toContain(
       'Missing required scope: projects:read',
     );
-    await cleanup();
   });
 });

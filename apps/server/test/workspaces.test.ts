@@ -2,10 +2,16 @@
 import '../src/config.js';
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { buildServer } from '../src/index.js';
-import { db, projectMemberships, workspaces, workspaceMemberships } from '@repo/db';
-import { inArray } from 'drizzle-orm';
+import { db, projectMemberships, workspaceMemberships } from '@repo/db';
 import type { FastifyInstance } from 'fastify';
+import {
+  closeTestServers,
+  createProjectViaHttp,
+  createTestServer,
+  createWorkspaceViaHttp,
+  parseJsonBody,
+  signUp,
+} from './helpers.js';
 
 let app: FastifyInstance;
 
@@ -13,7 +19,6 @@ let aliceCookie: string;
 let aliceId: string;
 let bobCookie: string;
 let bobId: string;
-const createdWorkspaceIds: string[] = [];
 
 const canonicalProjectKeys = [
   'id',
@@ -41,42 +46,6 @@ function expectCanonicalProject(
   expect(Object.keys(project).sort()).toEqual(canonicalProjectKeys);
 }
 
-/** Sign up a user and return their ID + session cookie. */
-async function signUp(email: string, name: string) {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/auth/sign-up/email',
-    headers: { 'content-type': 'application/json' },
-    payload: { email, password: 'password123', name },
-  });
-  const body = JSON.parse(res.body);
-  const setCookie = res.headers['set-cookie'] as string;
-  return { userId: body.user.id, cookie: setCookie.split(';')[0] };
-}
-
-/** Create a workspace via the API and track its ID for cleanup. */
-async function createWs(cookie: string, name: string) {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/workspaces',
-    headers: { 'content-type': 'application/json', cookie },
-    payload: { name },
-  });
-  const body = JSON.parse(res.body);
-  if (body.id) createdWorkspaceIds.push(body.id);
-  return { res, body };
-}
-
-async function createProject(cookie: string, workspaceSlug: string, name: string) {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/projects',
-    headers: { 'content-type': 'application/json', cookie },
-    payload: { workspaceSlug, name },
-  });
-  return { res, body: JSON.parse(res.body) };
-}
-
 /** Add a user as a member of a workspace directly in the DB. */
 async function addMember(workspaceId: string, userId: string, role: 'owner' | 'manager' | 'member' = 'member') {
   await db.insert(workspaceMemberships).values({
@@ -101,31 +70,28 @@ async function addProjectMember(
 }
 
 beforeAll(async () => {
-  app = buildServer();
+  app = await createTestServer();
   await app.ready();
 
   const ts = Date.now();
-  const alice = await signUp(`alice-ws-${ts}@test.com`, 'Alice');
+  const alice = await signUp(app, `alice-ws-${ts}@test.com`, 'Alice');
   aliceCookie = alice.cookie;
   aliceId = alice.userId;
 
-  const bob = await signUp(`bob-ws-${ts}@test.com`, 'Bob');
+  const bob = await signUp(app, `bob-ws-${ts}@test.com`, 'Bob');
   bobCookie = bob.cookie;
   bobId = bob.userId;
 });
 
 afterAll(async () => {
-  if (createdWorkspaceIds.length > 0) {
-    await db.delete(workspaces).where(inArray(workspaces.id, createdWorkspaceIds)).catch(() => {});
-  }
-  await app.close();
+  await closeTestServers();
 });
 
 // --- Workspace CRUD ---
 
 describe('POST /api/workspaces', () => {
   it('creates a workspace and returns 201', async () => {
-    const { res, body } = await createWs(aliceCookie, 'Route Test');
+    const { response: res, body } = await createWorkspaceViaHttp(app, aliceCookie, 'Route Test');
     expect(res.statusCode).toBe(201);
     expect(body.name).toBe('Route Test');
     expect(body.slug).toMatch(/^route-test/);
@@ -144,7 +110,7 @@ describe('POST /api/workspaces', () => {
 
 describe('GET /api/workspaces', () => {
   it('returns workspaces for the authenticated user', async () => {
-    await createWs(aliceCookie, 'List Test');
+    await createWorkspaceViaHttp(app, aliceCookie, 'List Test');
 
     const res = await app.inject({
       method: 'GET',
@@ -152,7 +118,7 @@ describe('GET /api/workspaces', () => {
       headers: { cookie: aliceCookie },
     });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(Array.isArray(body)).toBe(true);
     expect(body.some((w: { name: string }) => w.name === 'List Test')).toBe(true);
   });
@@ -165,7 +131,7 @@ describe('GET /api/workspaces', () => {
 
 describe('GET /api/workspaces/:workspaceSlug', () => {
   it('returns workspace + role for a member', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Fetch Test');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Fetch Test');
 
     const res = await app.inject({
       method: 'GET',
@@ -173,13 +139,13 @@ describe('GET /api/workspaces/:workspaceSlug', () => {
       headers: { cookie: aliceCookie },
     });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(body.id).toBe(ws.id);
     expect(body.role).toBe('owner');
   });
 
   it('returns 404 for non-member', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'No Bob Fetch');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'No Bob Fetch');
 
     const res = await app.inject({
       method: 'GET',
@@ -211,7 +177,7 @@ describe('GET /api/workspaces/:workspaceSlug/projects', () => {
   it.each(['owner', 'manager', 'member'] as const)(
     'returns every canonical project for a workspace %s',
     async (workspaceRole) => {
-      const { body: workspace } = await createWs(
+      const { body: workspace } = await createWorkspaceViaHttp(app,
         aliceCookie,
         `Filtered ${workspaceRole} Workspace`,
       );
@@ -219,12 +185,12 @@ describe('GET /api/workspaces/:workspaceSlug/projects', () => {
       if (workspaceRole !== 'owner') {
         await addMember(workspace.id, bobId, workspaceRole);
       }
-      const { body: projectA } = await createProject(
+      const { body: projectA } = await createProjectViaHttp(app,
         aliceCookie,
         workspace.slug,
         `Filtered ${workspaceRole} Project A`,
       );
-      const { body: projectB } = await createProject(
+      const { body: projectB } = await createProjectViaHttp(app,
         aliceCookie,
         workspace.slug,
         `Filtered ${workspaceRole} Project B`,
@@ -236,7 +202,7 @@ describe('GET /api/workspaces/:workspaceSlug/projects', () => {
         headers: { cookie: actorCookie },
       });
       expect(res.statusCode).toBe(200);
-      const body = JSON.parse(res.body);
+      const body = parseJsonBody(res);
       const expectedRole = workspaceRole === 'member' ? 'member' : 'owner';
       for (const project of [projectA, projectB]) {
         const listed = body.find((candidate: { id: string }) => candidate.id === project.id);
@@ -252,19 +218,19 @@ describe('GET /api/workspaces/:workspaceSlug/projects', () => {
   );
 
   it('allows direct-only filtered access without leaking siblings or other workspaces', async () => {
-    const { body: workspaceA } = await createWs(aliceCookie, 'Filtered Direct Workspace A');
-    const { body: workspaceB } = await createWs(aliceCookie, 'Filtered Direct Workspace B');
-    const { body: projectA } = await createProject(
+    const { body: workspaceA } = await createWorkspaceViaHttp(app, aliceCookie, 'Filtered Direct Workspace A');
+    const { body: workspaceB } = await createWorkspaceViaHttp(app, aliceCookie, 'Filtered Direct Workspace B');
+    const { body: projectA } = await createProjectViaHttp(app,
       aliceCookie,
       workspaceA.slug,
       'Filtered Direct Project A',
     );
-    const { body: siblingA } = await createProject(
+    const { body: siblingA } = await createProjectViaHttp(app,
       aliceCookie,
       workspaceA.slug,
       'Filtered Direct Sibling A',
     );
-    const { body: projectB } = await createProject(
+    const { body: projectB } = await createProjectViaHttp(app,
       aliceCookie,
       workspaceB.slug,
       'Filtered Direct Project B',
@@ -278,7 +244,7 @@ describe('GET /api/workspaces/:workspaceSlug/projects', () => {
       headers: { cookie: bobCookie },
     });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(body.map((project: { id: string }) => project.id)).toEqual([projectA.id]);
     expect(body.map((project: { id: string }) => project.id)).not.toContain(siblingA.id);
     expect(body.map((project: { id: string }) => project.id)).not.toContain(projectB.id);
@@ -292,8 +258,8 @@ describe('GET /api/workspaces/:workspaceSlug/projects', () => {
   });
 
   it('returns an empty list rather than revealing an inaccessible workspace', async () => {
-    const { body: workspace } = await createWs(aliceCookie, 'Filtered Private Workspace');
-    await createProject(aliceCookie, workspace.slug, 'Filtered Private Project');
+    const { body: workspace } = await createWorkspaceViaHttp(app, aliceCookie, 'Filtered Private Workspace');
+    await createProjectViaHttp(app, aliceCookie, workspace.slug, 'Filtered Private Project');
 
     const res = await app.inject({
       method: 'GET',
@@ -301,7 +267,7 @@ describe('GET /api/workspaces/:workspaceSlug/projects', () => {
       headers: { cookie: bobCookie },
     });
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toEqual([]);
+    expect(parseJsonBody(res)).toEqual([]);
   });
 
   it('returns 401 when unauthenticated', async () => {
@@ -315,7 +281,7 @@ describe('GET /api/workspaces/:workspaceSlug/projects', () => {
 
 describe('PATCH /api/workspaces/:workspaceSlug', () => {
   it('owner can update name', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Before Patch');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Before Patch');
 
     const res = await app.inject({
       method: 'PATCH',
@@ -324,12 +290,12 @@ describe('PATCH /api/workspaces/:workspaceSlug', () => {
       payload: { name: 'After Patch' },
     });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(body.name).toBe('After Patch');
   });
 
   it('manager can update name', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Manager Update');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Manager Update');
     await addMember(ws.id, bobId, 'manager');
 
     const res = await app.inject({
@@ -339,12 +305,12 @@ describe('PATCH /api/workspaces/:workspaceSlug', () => {
       payload: { name: 'Manager Updated' },
     });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(body.name).toBe('Manager Updated');
   });
 
   it('member cannot update', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'No Member Update');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'No Member Update');
     await addMember(ws.id, bobId, 'member');
 
     const res = await app.inject({
@@ -357,7 +323,7 @@ describe('PATCH /api/workspaces/:workspaceSlug', () => {
   });
 
   it('returns 404 for non-member', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Private Update');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Private Update');
 
     const res = await app.inject({
       method: 'PATCH',
@@ -371,7 +337,7 @@ describe('PATCH /api/workspaces/:workspaceSlug', () => {
 
 describe('DELETE /api/workspaces/:workspaceSlug', () => {
   it('owner can delete with correct confirmation', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'To Delete');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'To Delete');
 
     const res = await app.inject({
       method: 'DELETE',
@@ -391,7 +357,7 @@ describe('DELETE /api/workspaces/:workspaceSlug', () => {
   });
 
   it('manager cannot delete', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Manager No Delete');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Manager No Delete');
     await addMember(ws.id, bobId, 'manager');
 
     const res = await app.inject({
@@ -404,7 +370,7 @@ describe('DELETE /api/workspaces/:workspaceSlug', () => {
   });
 
   it('returns 400 with incorrect confirmation', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Bad Delete');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Bad Delete');
 
     const res = await app.inject({
       method: 'DELETE',
@@ -416,7 +382,7 @@ describe('DELETE /api/workspaces/:workspaceSlug', () => {
   });
 
   it('member cannot delete', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Member No Delete');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Member No Delete');
     await addMember(ws.id, bobId, 'member');
 
     const res = await app.inject({
@@ -433,7 +399,7 @@ describe('DELETE /api/workspaces/:workspaceSlug', () => {
 
 describe('GET /api/workspaces/:workspaceSlug/members', () => {
   it('returns members list for authorized user', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Members List');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Members List');
     await addMember(ws.id, bobId, 'member');
 
     const res = await app.inject({
@@ -442,13 +408,13 @@ describe('GET /api/workspaces/:workspaceSlug/members', () => {
       headers: { cookie: aliceCookie },
     });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(Array.isArray(body)).toBe(true);
     expect(body).toHaveLength(2); // Alice (owner) + Bob (member)
   });
 
   it('returns 404 for non-member', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Private Members');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Private Members');
 
     const res = await app.inject({
       method: 'GET',
@@ -461,7 +427,7 @@ describe('GET /api/workspaces/:workspaceSlug/members', () => {
 
 describe('DELETE /api/workspaces/:workspaceSlug/members/:userId', () => {
   it('owner can remove member', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Remove Member');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Remove Member');
     await addMember(ws.id, bobId, 'member');
 
     const res = await app.inject({
@@ -473,12 +439,12 @@ describe('DELETE /api/workspaces/:workspaceSlug/members/:userId', () => {
   });
 
   it('manager can remove member but not owner', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Manager Remove');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Manager Remove');
     await addMember(ws.id, bobId, 'manager');
 
     // Create another member
     const ts = Date.now();
-    const carol = await signUp(`carol-ws-${ts}@test.com`, 'Carol');
+    const carol = await signUp(app, `carol-ws-${ts}@test.com`, 'Carol');
     await addMember(ws.id, carol.userId, 'member');
 
     // Manager can remove member
@@ -499,7 +465,7 @@ describe('DELETE /api/workspaces/:workspaceSlug/members/:userId', () => {
   });
 
   it('cannot remove self', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Self Remove');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Self Remove');
 
     const res = await app.inject({
       method: 'DELETE',
@@ -510,11 +476,11 @@ describe('DELETE /api/workspaces/:workspaceSlug/members/:userId', () => {
   });
 
   it('member cannot remove others', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Member Remove Block');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Member Remove Block');
     await addMember(ws.id, bobId, 'member');
 
     const ts = Date.now();
-    const carol = await signUp(`carol2-ws-${ts}@test.com`, 'Carol');
+    const carol = await signUp(app, `carol2-ws-${ts}@test.com`, 'Carol');
     await addMember(ws.id, carol.userId, 'member');
 
     const res = await app.inject({
@@ -530,7 +496,7 @@ describe('DELETE /api/workspaces/:workspaceSlug/members/:userId', () => {
 
 describe('GET /api/workspaces/:workspaceSlug/invites', () => {
   it('owner can list invites', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Invites List');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Invites List');
 
     const res = await app.inject({
       method: 'GET',
@@ -538,14 +504,14 @@ describe('GET /api/workspaces/:workspaceSlug/invites', () => {
       headers: { cookie: aliceCookie },
     });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(Array.isArray(body)).toBe(true);
   });
 });
 
 describe('POST /api/workspaces/:workspaceSlug/invites', () => {
   it('owner can create invite with role', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Create Invite');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Create Invite');
 
     const res = await app.inject({
       method: 'POST',
@@ -554,7 +520,7 @@ describe('POST /api/workspaces/:workspaceSlug/invites', () => {
       payload: { email: 'newuser@example.com', role: 'manager' },
     });
     expect(res.statusCode).toBe(201);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(body.inviteUrl).toMatch(/\/invite\/workspace\//);
     // Full mapped WorkspaceInvite shape (routed through the shared mapper).
     expect(typeof body.invite.id).toBe('string');
@@ -574,7 +540,7 @@ describe('POST /api/workspaces/:workspaceSlug/invites', () => {
   });
 
   it('manager can create invite', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'Manager Invite');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'Manager Invite');
     await addMember(ws.id, bobId, 'manager');
 
     const res = await app.inject({
@@ -587,7 +553,7 @@ describe('POST /api/workspaces/:workspaceSlug/invites', () => {
   });
 
   it('member cannot create invite', async () => {
-    const { body: ws } = await createWs(aliceCookie, 'No Member Invite');
+    const { body: ws } = await createWorkspaceViaHttp(app, aliceCookie, 'No Member Invite');
     await addMember(ws.id, bobId, 'member');
 
     const res = await app.inject({

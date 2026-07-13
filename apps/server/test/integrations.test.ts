@@ -2,20 +2,15 @@
 import '../src/config.js';
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
-import { buildServer } from '../src/index.js';
-import { db, integrations, workspaces, workspaceMemberships } from '@repo/db';
-import { inArray, eq } from 'drizzle-orm';
+import { db, workspaceMemberships } from '@repo/db';
 import type { FastifyInstance } from 'fastify';
-import { parseJsonBody } from './helpers.js';
-
-interface SignUpBody {
-  user: { id: string };
-}
-
-interface WorkspaceBody {
-  id: string;
-  slug: string;
-}
+import {
+  closeTestServers,
+  createTestServer,
+  createWorkspaceViaHttp,
+  parseJsonBody,
+  signUp,
+} from './helpers.js';
 
 interface IntegrationBody {
   id: string;
@@ -38,30 +33,13 @@ let nonMemberCookie: string;
 let testWorkspaceId: string;
 let testWorkspaceSlug: string;
 
-const createdIntegrationIds: string[] = [];
-
-/** Sign up a user and return their ID + session cookie. */
-async function signUp(email: string, name: string) {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/auth/sign-up/email',
-    headers: { 'content-type': 'application/json' },
-    payload: { email, password: 'password123', name },
-  });
-  const body = parseJsonBody<SignUpBody>(res);
-  const setCookie = res.headers['set-cookie'] as string;
-  return { userId: body.user.id, cookie: setCookie.split(';')[0] };
-}
-
 /** Create a workspace and add members */
 async function setupTestWorkspace() {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/workspaces',
-    headers: { 'content-type': 'application/json', cookie: ownerCookie },
-    payload: { name: 'Integration Test Workspace' },
-  });
-  const body = parseJsonBody<WorkspaceBody>(res);
+  const { body } = await createWorkspaceViaHttp(
+    app,
+    ownerCookie,
+    'Integration Test Workspace',
+  );
   testWorkspaceId = body.id;
   testWorkspaceSlug = body.slug;
 
@@ -75,39 +53,29 @@ async function setupTestWorkspace() {
 }
 
 beforeAll(async () => {
-  app = buildServer();
+  app = await createTestServer();
   await app.ready();
 
   const ts = Date.now();
 
   // Create owner user
-  const owner = await signUp(`owner-int-${ts}@test.com`, 'Owner');
+  const owner = await signUp(app, `owner-int-${ts}@test.com`, 'Owner');
   ownerCookie = owner.cookie;
 
   // Create member user
-  const member = await signUp(`member-int-${ts}@test.com`, 'Member');
+  const member = await signUp(app, `member-int-${ts}@test.com`, 'Member');
   memberCookie = member.cookie;
   memberId = member.userId;
 
   // Create non-member user
-  const nonMember = await signUp(`nonmember-int-${ts}@test.com`, 'NonMember');
+  const nonMember = await signUp(app, `nonmember-int-${ts}@test.com`, 'NonMember');
   nonMemberCookie = nonMember.cookie;
 
   await setupTestWorkspace();
 });
 
 afterAll(async () => {
-  // Clean up created integrations
-  if (createdIntegrationIds.length > 0) {
-    await db.delete(integrations).where(inArray(integrations.id, createdIntegrationIds)).catch(() => {});
-  }
-
-  // Clean up workspace
-  if (testWorkspaceId) {
-    await db.delete(workspaces).where(eq(workspaces.id, testWorkspaceId)).catch(() => {});
-  }
-
-  await app.close();
+  await closeTestServers();
 });
 
 beforeEach(() => {
@@ -139,7 +107,6 @@ describe('POST /api/workspaces/:workspaceSlug/integrations', () => {
     expect(body.config.botToken).toMatch(/^••••••••/);
     expect(body.config.signingSecret).toMatch(/^••••••••/);
 
-    createdIntegrationIds.push(body.id);
   });
 
   it('returns 403 when member tries to create', async () => {
@@ -211,7 +178,6 @@ describe('GET /api/workspaces/:workspaceSlug/integrations', () => {
       },
     });
     const created = parseJsonBody<IntegrationBody>(createRes);
-    createdIntegrationIds.push(created.id);
 
     // List integrations
     const res = await app.inject({
@@ -235,7 +201,7 @@ describe('GET /api/workspaces/:workspaceSlug/integrations', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(Array.isArray(body)).toBe(true);
   });
 
@@ -277,9 +243,8 @@ describe('POST /api/workspaces/:workspaceSlug/integrations/:integrationId/test',
         },
       },
     });
-    const created = JSON.parse(createRes.body);
+    const created = parseJsonBody(createRes);
     testIntegrationId = created.id;
-    createdIntegrationIds.push(created.id);
   });
 
   it('tests integration successfully with mocked Slack API', async () => {
@@ -304,7 +269,7 @@ describe('POST /api/workspaces/:workspaceSlug/integrations/:integrationId/test',
     });
 
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(body.status).toBe('active');
     expect(body.lastTestedAt).toBeDefined();
     expect(body.info).toMatchObject({
@@ -334,7 +299,7 @@ describe('POST /api/workspaces/:workspaceSlug/integrations/:integrationId/test',
     });
 
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(body.status).toBe('error');
     expect(body.error).toBe('invalid_auth');
   });
@@ -368,9 +333,8 @@ describe('PATCH /api/workspaces/:workspaceSlug/integrations/:integrationId', () 
         },
       },
     });
-    const created = JSON.parse(createRes.body);
+    const created = parseJsonBody(createRes);
     patchIntegrationId = created.id;
-    createdIntegrationIds.push(created.id);
   });
 
   it('updates integration and automatically retests with new config', async () => {
@@ -397,7 +361,7 @@ describe('PATCH /api/workspaces/:workspaceSlug/integrations/:integrationId', () 
     });
 
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(body.name).toBe('Updated Name');
     expect(body.status).toBe('error'); // Auto-retest failed
     expect(body.config.botToken).toMatch(/^••••••••/); // Still masked
@@ -414,7 +378,7 @@ describe('PATCH /api/workspaces/:workspaceSlug/integrations/:integrationId', () 
     });
 
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(body.name).toBe('Name Only Update');
   });
 
@@ -448,8 +412,7 @@ describe('DELETE /api/workspaces/:workspaceSlug/integrations/:integrationId', ()
         },
       },
     });
-    const created = JSON.parse(createRes.body);
-    // Don't add to createdIntegrationIds since we're deleting it
+    const created = parseJsonBody(createRes);
 
     // Delete the integration
     const deleteRes = await app.inject({
@@ -485,8 +448,7 @@ describe('DELETE /api/workspaces/:workspaceSlug/integrations/:integrationId', ()
         },
       },
     });
-    const created = JSON.parse(createRes.body);
-    createdIntegrationIds.push(created.id);
+    const created = parseJsonBody(createRes);
 
     const res = await app.inject({
       method: 'DELETE',
@@ -532,9 +494,8 @@ describe('GET /api/workspaces/:workspaceSlug/integrations/:integrationId', () =>
       throw new Error(`Failed to create integration for GET tests: ${createRes.body}`);
     }
 
-    const created = JSON.parse(createRes.body);
+    const created = parseJsonBody(createRes);
     getIntegrationId = created.id;
-    createdIntegrationIds.push(created.id);
   });
 
   it('returns integration with masked credentials', async () => {
@@ -545,7 +506,7 @@ describe('GET /api/workspaces/:workspaceSlug/integrations/:integrationId', () =>
     });
 
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
+    const body = parseJsonBody(res);
     expect(body.id).toBe(getIntegrationId);
     expect(body.name).toBe('Get Test Integration');
     expect(body.config.botToken).toMatch(/^••••••••/);

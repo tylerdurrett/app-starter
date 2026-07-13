@@ -1,60 +1,38 @@
 // Ensure .env is loaded before @repo/db reads DATABASE_URL
 import '../src/config.js';
 
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
-import { buildServer } from '../src/index.js';
-import { db, projects } from '@repo/db';
-import { inArray } from 'drizzle-orm';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 
-import { createWorkspace } from '../src/workspaces/service.js';
-import { createProject } from '../src/projects/service.js';
 import * as slug from '../src/projects/slug.js';
+import {
+  createProjectViaService,
+  createTestServer,
+  createWorkspaceViaService,
+  signUp,
+} from './helpers.js';
 
 let app: FastifyInstance;
 let ownerId: string;
 let workspaceId: string;
-const createdProjectIds: string[] = [];
-
-async function signUp(email: string, name: string): Promise<string> {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/auth/sign-up/email',
-    headers: { 'content-type': 'application/json' },
-    payload: { email, password: 'password123', name },
-  });
-  return JSON.parse(res.body).user.id;
-}
 
 async function createProjectIn(name: string, wsId: string) {
-  const proj = await createProject({ name, workspaceId: wsId, ownerUserId: ownerId });
-  createdProjectIds.push(proj!.id);
-  return proj!;
+  return createProjectViaService(name, wsId, ownerId);
 }
 
 beforeAll(async () => {
-  app = buildServer();
+  app = await createTestServer();
   await app.ready();
 
   const ts = Date.now();
-  ownerId = await signUp(`slug-race-owner-${ts}@test.com`, 'Slug Race Owner');
+  ownerId = (await signUp(app, `slug-race-owner-${ts}@test.com`, 'Slug Race Owner')).userId;
 
-  const ws = await createWorkspace({ name: `Slug Race Workspace ${ts}`, ownerUserId: ownerId });
+  const ws = await createWorkspaceViaService(`Slug Race Workspace ${ts}`, ownerId);
   workspaceId = ws.id;
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
-});
-
-afterAll(async () => {
-  if (createdProjectIds.length > 0) {
-    await db
-      .delete(projects)
-      .where(inArray(projects.id, createdProjectIds))
-      .catch(() => {});
-  }
-  await app.close();
 });
 
 describe('createProject slug race retry', () => {

@@ -1,9 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { buildServer } from '../src/index.js';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { PASSWORD_MIN_LENGTH } from '@repo/shared';
 import { db, oauthClients } from '@repo/db';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
+
+import { createTestServer, parseResponse, signUp } from './helpers.js';
+
+interface AuthBody {
+  user: { email: string; name: string };
+  token: string;
+}
+
+interface ErrorBody {
+  code?: string;
+  message?: string;
+}
 
 describe('Auth endpoints', () => {
   let app: FastifyInstance;
@@ -12,30 +23,14 @@ describe('Auth endpoints', () => {
   const testName = 'Test User';
 
   beforeEach(async () => {
-    app = buildServer();
+    app = await createTestServer();
     await app.ready();
   });
 
-  afterEach(async () => {
-    await app.close();
-  });
-
   it('should register a new user via sign-up endpoint', async () => {
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/auth/sign-up/email',
-      headers: {
-        'content-type': 'application/json',
-      },
-      payload: {
-        email: testEmail,
-        password: testPassword,
-        name: testName,
-      },
-    });
+    const { statusCode, body } = await signUp(app, testEmail, testName, testPassword);
 
-    expect(response.statusCode).toBe(200);
-    const body = JSON.parse(response.body);
+    expect(statusCode).toBe(200);
     expect(body.user).toBeDefined();
     expect(body.user.email).toBe(testEmail);
     expect(body.user.name).toBe(testName);
@@ -44,18 +39,7 @@ describe('Auth endpoints', () => {
 
   it('should sign in with registered user', async () => {
     // First, register the user
-    await app.inject({
-      method: 'POST',
-      url: '/api/auth/sign-up/email',
-      headers: {
-        'content-type': 'application/json',
-      },
-      payload: {
-        email: `signin-${testEmail}`,
-        password: testPassword,
-        name: testName,
-      },
-    });
+    await signUp(app, `signin-${testEmail}`, testName, testPassword);
 
     // Then sign in
     const response = await app.inject({
@@ -70,8 +54,8 @@ describe('Auth endpoints', () => {
       },
     });
 
-    expect(response.statusCode).toBe(200);
-    const body = JSON.parse(response.body);
+    const { statusCode, body } = parseResponse<AuthBody>(response);
+    expect(statusCode).toBe(200);
     expect(body.user).toBeDefined();
     expect(body.user.email).toBe(`signin-${testEmail}`);
     expect(body.token).toBeDefined();
@@ -84,33 +68,22 @@ describe('Auth endpoints', () => {
 
   it('should get session with valid cookie', async () => {
     // Register and sign in to get a session
-    const signUpResponse = await app.inject({
-      method: 'POST',
-      url: '/api/auth/sign-up/email',
-      headers: {
-        'content-type': 'application/json',
-      },
-      payload: {
-        email: `session-${testEmail}`,
-        password: testPassword,
-        name: testName,
-      },
-    });
-
-    const setCookie = signUpResponse.headers['set-cookie'] as string;
-    const cookieValue = setCookie.split(';')[0];
+    const { cookie } = await signUp(app, `session-${testEmail}`, testName, testPassword);
 
     // Get session with the cookie
     const response = await app.inject({
       method: 'GET',
       url: '/api/auth/get-session',
       headers: {
-        cookie: cookieValue,
+        cookie,
       },
     });
 
-    expect(response.statusCode).toBe(200);
-    const body = JSON.parse(response.body);
+    const { statusCode, body } = parseResponse<{
+      session: unknown;
+      user: { email: string };
+    }>(response);
+    expect(statusCode).toBe(200);
     expect(body.session).toBeDefined();
     expect(body.user).toBeDefined();
     expect(body.user.email).toBe(`session-${testEmail}`);
@@ -122,8 +95,8 @@ describe('Auth endpoints', () => {
       url: '/api/auth/get-session',
     });
 
-    expect(response.statusCode).toBe(200);
-    const body = JSON.parse(response.body);
+    const { statusCode, body } = parseResponse<null>(response);
+    expect(statusCode).toBe(200);
     // Better Auth returns null when no session exists
     expect(body).toBeNull();
   });
@@ -132,18 +105,7 @@ describe('Auth endpoints', () => {
     const duplicateEmail = `duplicate-${testEmail}`;
 
     // First registration should succeed
-    const firstResponse = await app.inject({
-      method: 'POST',
-      url: '/api/auth/sign-up/email',
-      headers: {
-        'content-type': 'application/json',
-      },
-      payload: {
-        email: duplicateEmail,
-        password: testPassword,
-        name: testName,
-      },
-    });
+    const firstResponse = await signUp(app, duplicateEmail, testName, testPassword);
 
     expect(firstResponse.statusCode).toBe(200);
 
@@ -162,8 +124,8 @@ describe('Auth endpoints', () => {
     });
 
     // Better Auth returns 422 for validation errors (duplicate email)
-    expect(secondResponse.statusCode).toBe(422);
-    const body = JSON.parse(secondResponse.body);
+    const { statusCode, body } = parseResponse<ErrorBody>(secondResponse);
+    expect(statusCode).toBe(422);
     expect(body.message).toBeDefined();
   });
 
@@ -182,8 +144,8 @@ describe('Auth endpoints', () => {
       },
     });
 
-    expect(response.statusCode).toBe(400);
-    const body = JSON.parse(response.body);
+    const { statusCode, body } = parseResponse<ErrorBody>(response);
+    expect(statusCode).toBe(400);
     expect(body.code).toBe('PASSWORD_TOO_SHORT');
   });
 
@@ -199,25 +161,15 @@ describe('Auth endpoints', () => {
       },
     });
 
-    expect(response.statusCode).toBe(400);
-    expect(JSON.parse(response.body).code).toBe('PASSWORD_TOO_SHORT');
+    const { statusCode, body } = parseResponse<ErrorBody>(response);
+    expect(statusCode).toBe(400);
+    expect(body.code).toBe('PASSWORD_TOO_SHORT');
   });
 
   it('should return error for invalid credentials on sign-in', async () => {
     // Register a user
     const invalidCredEmail = `invalid-${testEmail}`;
-    await app.inject({
-      method: 'POST',
-      url: '/api/auth/sign-up/email',
-      headers: {
-        'content-type': 'application/json',
-      },
-      payload: {
-        email: invalidCredEmail,
-        password: testPassword,
-        name: testName,
-      },
-    });
+    await signUp(app, invalidCredEmail, testName, testPassword);
 
     // Try to sign in with wrong password
     const response = await app.inject({
@@ -233,8 +185,8 @@ describe('Auth endpoints', () => {
     });
 
     // Better Auth returns 401 for authentication failures
-    expect(response.statusCode).toBe(401);
-    const body = JSON.parse(response.body);
+    const { statusCode, body } = parseResponse<ErrorBody>(response);
+    expect(statusCode).toBe(401);
     expect(body.message).toBeDefined();
   });
 

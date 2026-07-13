@@ -14,7 +14,9 @@
       "dependsOn": ["^build"]
     },
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "cache": false,
+      "passThroughEnv": ["DATABASE_URL", "CREDENTIAL_ENCRYPTION_KEY", "BETTER_AUTH_SECRET"]
     },
     "typecheck": {}
   }
