@@ -3,7 +3,11 @@ import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Button } from '@repo/ui';
 import { getProject } from '../lib/projects';
-import { queryKeys } from '../lib/query-keys';
+import {
+  lastActiveProjectQueryOptions,
+  lastActiveProjectValidationQueryOptions,
+  projectQueryOptions,
+} from '../lib/project-queries';
 import { ApiError } from '../lib/api';
 import { resolveProject } from '../lib/project-resolver';
 
@@ -14,7 +18,20 @@ export const Route = createFileRoute('/_app/w/$workspaceSlug/p/$projectSlug')({
       // Gate passed — seed the query cache so the settings component's useQuery
       // reads this same value (ADR-0007) and a rename refreshes live.
       context.queryClient.setQueryData(
-        queryKeys.project(params.workspaceSlug, params.projectSlug),
+        projectQueryOptions(params.workspaceSlug, params.projectSlug).queryKey,
+        project,
+      );
+      const activeHint = {
+        workspaceSlug: project.workspaceSlug,
+        projectSlug: project.slug,
+        projectId: project.id,
+      };
+      // A successful Project gate is also the freshest possible last-active
+      // verdict. Seed both the base resolver read and this exact coherent hint
+      // so a prior hint's cached verdict can never judge the newly loaded one.
+      context.queryClient.setQueryData(lastActiveProjectQueryOptions().queryKey, project);
+      context.queryClient.setQueryData(
+        lastActiveProjectValidationQueryOptions(activeHint).queryKey,
         project,
       );
       return { project };
