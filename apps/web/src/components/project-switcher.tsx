@@ -47,7 +47,7 @@ export function ProjectSwitcher({
           muted: !activeProject,
         }}
         onOpen={() => {
-          void projectsQuery.refetch();
+          void projectsQuery.refetch({ cancelRefetch: false });
         }}
       >
         {({ close }) => (

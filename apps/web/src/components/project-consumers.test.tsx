@@ -174,6 +174,34 @@ describe('workspace project query consumers', () => {
     expect(await screen.findByText('Failed to load projects')).toBeInTheDocument();
   });
 
+  it('does not restart an in-flight mount refetch when opened with stale cached data', async () => {
+    const user = userEvent.setup();
+    const request = deferred<ProjectWithRole[]>();
+    mocks.listProjectsForWorkspace.mockReturnValue(request.promise);
+    const client = createClient();
+    const cachedProject = project('acme', 'cached', 'Cached project');
+    client.setQueryData(queryKeys.projects('acme'), [cachedProject]);
+
+    render(
+      <Providers client={client}>
+        <ProjectSwitcher
+          workspaceSlug="acme"
+          workspaceRole="owner"
+          activeProjectSlug="cached"
+        />
+      </Providers>,
+    );
+
+    await waitFor(() => expect(mocks.listProjectsForWorkspace).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole('button', { name: 'Switch project' }));
+
+    expect(screen.getByRole('link', { name: /Cached project/ })).toBeInTheDocument();
+    expect(mocks.listProjectsForWorkspace).toHaveBeenCalledOnce();
+
+    await act(async () => request.resolve([project('acme', 'fresh', 'Fresh project')]));
+    expect(await screen.findByRole('link', { name: /Fresh project/ })).toBeInTheDocument();
+  });
+
   it('renders Query-owned empty and error states on workspace home', async () => {
     mocks.listProjectsForWorkspace.mockResolvedValueOnce([]);
     const emptyView = render(
