@@ -1,59 +1,37 @@
 // Ensure .env is loaded before @repo/db reads DATABASE_URL
 import '../src/config.js';
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { buildServer } from '../src/index.js';
-import { db, projects } from '@repo/db';
-import { inArray } from 'drizzle-orm';
+import { describe, it, expect, beforeAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 
-import { createWorkspace } from '../src/workspaces/service.js';
-import { createProject } from '../src/projects/service.js';
 import { ensureUniqueSlug } from '../src/projects/slug.js';
+import {
+  createProjectViaService,
+  createTestServer,
+  createWorkspaceViaService,
+  signUp,
+} from './helpers.js';
 
 let app: FastifyInstance;
 let ownerId: string;
 let workspaceA: string;
 let workspaceB: string;
-const createdProjectIds: string[] = [];
-
-async function signUp(email: string, name: string): Promise<string> {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/api/auth/sign-up/email',
-    headers: { 'content-type': 'application/json' },
-    payload: { email, password: 'password123', name },
-  });
-  return JSON.parse(res.body).user.id;
-}
 
 async function createProjectIn(name: string, workspaceId: string) {
-  const proj = await createProject({ name, workspaceId, ownerUserId: ownerId });
-  createdProjectIds.push(proj!.id);
-  return proj!;
+  return createProjectViaService(name, workspaceId, ownerId);
 }
 
 beforeAll(async () => {
-  app = buildServer();
+  app = await createTestServer();
   await app.ready();
 
   const ts = Date.now();
-  ownerId = await signUp(`slug-owner-${ts}@test.com`, 'Slug Owner');
+  ownerId = (await signUp(app, `slug-owner-${ts}@test.com`, 'Slug Owner')).userId;
 
-  const wsA = await createWorkspace({ name: `Slug Workspace A ${ts}`, ownerUserId: ownerId });
-  const wsB = await createWorkspace({ name: `Slug Workspace B ${ts}`, ownerUserId: ownerId });
+  const wsA = await createWorkspaceViaService(`Slug Workspace A ${ts}`, ownerId);
+  const wsB = await createWorkspaceViaService(`Slug Workspace B ${ts}`, ownerId);
   workspaceA = wsA.id;
   workspaceB = wsB.id;
-});
-
-afterAll(async () => {
-  if (createdProjectIds.length > 0) {
-    await db
-      .delete(projects)
-      .where(inArray(projects.id, createdProjectIds))
-      .catch(() => {});
-  }
-  await app.close();
 });
 
 describe('workspace-scoped slug uniqueness', () => {
