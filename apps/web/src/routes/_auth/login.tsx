@@ -1,8 +1,10 @@
 import { createFileRoute, Link, useNavigate, getRouteApi } from '@tanstack/react-router';
 import { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
 import { signIn } from '../../lib/auth-client';
 import { resolveProject } from '../../lib/project-resolver';
+import { clearAuthenticatedClientState } from '../../lib/authenticated-client-state';
 
 const authRoute = getRouteApi('/_auth');
 
@@ -12,6 +14,7 @@ export const Route = createFileRoute('/_auth/login')({
 
 function LoginPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { redirectTo } = authRoute.useSearch();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -42,10 +45,12 @@ function LoginPage() {
         return;
       }
 
+      clearAuthenticatedClientState(queryClient);
+
       if (redirectTo) {
         await navigate({ to: redirectTo });
       } else {
-        const target = await resolveProject();
+        const target = await resolveProject(queryClient);
         await navigate(target);
       }
     } catch {

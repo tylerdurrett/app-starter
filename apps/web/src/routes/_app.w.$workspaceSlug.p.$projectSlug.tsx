@@ -1,5 +1,6 @@
 import { createFileRoute, Outlet, notFound, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Button } from '@repo/ui';
 import { getProject } from '../lib/projects';
 import { queryKeys } from '../lib/query-keys';
@@ -34,12 +35,13 @@ function ProjectLayout() {
 
 function ProjectNotFound() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [isNavigating, setIsNavigating] = useState(false);
 
   const handleGoHome = async () => {
     setIsNavigating(true);
     try {
-      const target = await resolveProject();
+      const target = await resolveProject(queryClient);
       await navigate(target);
     } catch {
       setIsNavigating(false);

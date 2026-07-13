@@ -123,7 +123,7 @@ export function createWorkspaceSettingsAdapters({
           refreshAfterDelete: (client: QueryClient) =>
             client.invalidateQueries({ queryKey: queryKeys.workspaces() }),
           onDeleted: async () => {
-            await navigate(await dependencies.resolveDestination());
+            await navigate(await dependencies.resolveDestination(queryClient));
           },
         }
       : undefined,

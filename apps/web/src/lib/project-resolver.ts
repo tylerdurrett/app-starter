@@ -1,5 +1,9 @@
-import { getLastActiveProject, listProjects } from './projects';
-import { listWorkspaces } from './workspaces';
+import type { QueryClient } from '@tanstack/react-query';
+import {
+  accessibleProjectsQueryOptions,
+  lastActiveProjectQueryOptions,
+} from './project-queries';
+import { workspacesQueryOptions } from './workspace-queries';
 
 interface ProjectRedirectTarget {
   to: string;
@@ -18,8 +22,8 @@ interface ProjectRedirectTarget {
  * Returns a navigation target compatible with both TanStack Router's
  * `redirect()` (in beforeLoad) and `navigate()` (in event handlers).
  */
-export async function resolveProject(): Promise<ProjectRedirectTarget> {
-  const lastActive = await getLastActiveProject();
+export async function resolveProject(queryClient: QueryClient): Promise<ProjectRedirectTarget> {
+  const lastActive = await queryClient.fetchQuery(lastActiveProjectQueryOptions());
   if (lastActive) {
     return {
       to: '/w/$workspaceSlug/p/$projectSlug',
@@ -27,7 +31,7 @@ export async function resolveProject(): Promise<ProjectRedirectTarget> {
     };
   }
 
-  const projects = await listProjects();
+  const projects = await queryClient.fetchQuery(accessibleProjectsQueryOptions());
   const firstProject = projects[0];
   if (firstProject) {
     return {
@@ -37,7 +41,7 @@ export async function resolveProject(): Promise<ProjectRedirectTarget> {
   }
 
   // Fall back to workspace if no projects exist (Phase 4 compatibility)
-  const workspaces = await listWorkspaces();
+  const workspaces = await queryClient.fetchQuery(workspacesQueryOptions());
   const firstWorkspace = workspaces[0];
   if (firstWorkspace) {
     return { to: '/w/$workspaceSlug', params: { workspaceSlug: firstWorkspace.slug } };
