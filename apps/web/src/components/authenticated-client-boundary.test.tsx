@@ -76,7 +76,6 @@ describe('AuthenticatedClientBoundary', () => {
     });
     await establishAuthenticatedClientOwner(queryClient, 'user-a');
     queryClient.setQueryData(['private', 'user-a'], { secret: true });
-
     const view = render(
       <QueryClientProvider client={queryClient}>
         <AuthenticatedClientBoundary>
@@ -135,6 +134,48 @@ describe('AuthenticatedClientBoundary', () => {
     await waitFor(() => expect(screen.getByText('user-b')).toBeInTheDocument());
     expect(mocks.privateRead).toHaveBeenCalledOnce();
     expect(mocks.invalidate).toHaveBeenCalledOnce();
+  });
+
+  it('hides stale user A after a route observation establishes B, then recovers as B', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    await establishAuthenticatedClientOwner(queryClient, 'user-a');
+    queryClient.setQueryData(['private', 'user-a'], { secret: true });
+    mocks.privateRead.mockResolvedValue({ secret: 'user-b' });
+
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AuthenticatedClientBoundary>
+          <PrivateConsumer userId="user-a" />
+        </AuthenticatedClientBoundary>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText('user-a')).toBeInTheDocument();
+
+    await establishAuthenticatedClientOwner(queryClient, 'user-b');
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <AuthenticatedClientBoundary>
+          <PrivateConsumer userId="user-a" />
+        </AuthenticatedClientBoundary>
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByText('user-a')).not.toBeInTheDocument();
+    expect(mocks.privateRead).not.toHaveBeenCalled();
+
+    mocks.session.data = { user: { id: 'user-b' } };
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <AuthenticatedClientBoundary>
+          <PrivateConsumer userId="user-b" />
+        </AuthenticatedClientBoundary>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByText('user-b')).toBeInTheDocument());
+    expect(mocks.privateRead).toHaveBeenCalledOnce();
   });
 
   it('keeps the shell hidden and navigates out when the mounted session disappears', async () => {

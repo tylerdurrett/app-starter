@@ -18,7 +18,13 @@ export function AuthenticatedClientBoundary({ children }: { children: ReactNode 
   );
 
   useEffect(() => {
-    if (session.isPending || session.isRefetching || validatedOwner === userId) return;
+    if (session.isPending || session.isRefetching) return;
+    if (validatedOwner === userId) {
+      // A route observation can establish the next owner before the reactive
+      // session catches up. The render gate below hides this stale identity;
+      // do not let it reclaim the client from the newer observation.
+      return;
+    }
 
     let active = true;
     void establishAuthenticatedClientOwner(queryClient, userId).then(async () => {
@@ -37,6 +43,6 @@ export function AuthenticatedClientBoundary({ children }: { children: ReactNode 
   }, [queryClient, router, session.isPending, session.isRefetching, userId, validatedOwner]);
 
   if (session.isPending || session.isRefetching) return null;
-  if (userId === null || validatedOwner !== userId) return null;
+  if (userId === null || validatedOwner !== userId || !ownerMatches) return null;
   return children;
 }
