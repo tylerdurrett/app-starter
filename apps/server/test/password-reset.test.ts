@@ -1,12 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+
+import { createTestServer, parseResponse, signUp } from './helpers.js';
 
 // Spy on sendEmail so we can assert on the reset link without touching Resend.
 const sendEmailMock = vi.fn(async () => {});
 vi.mock('../src/email/send.js', () => ({ sendEmail: sendEmailMock }));
 
-// buildServer imports auth.ts which imports email/send.js — so the mock above must come first.
-const { buildServer } = await import('../src/index.js');
+// The server imports auth.ts which imports email/send.js — so the mock above must come first.
 
 const REDIRECT_TO = 'http://localhost:5200/reset-password';
 
@@ -35,25 +36,19 @@ function tokenFromLastEmail() {
 describe('Password reset endpoints', () => {
   let app: FastifyInstance;
   const stamp = Date.now();
-  const email = `reset-${stamp}@example.com`;
+  let email: string;
+  let testNumber = 0;
   const originalPassword = 'originalPw1';
   const newPassword = 'brandNewPw2';
   const name = 'Reset Tester';
 
   beforeEach(async () => {
     sendEmailMock.mockClear();
-    app = buildServer();
+    email = `reset-${stamp}-${testNumber}@example.com`;
+    testNumber += 1;
+    app = await createTestServer();
     await app.ready();
-    await app.inject({
-      method: 'POST',
-      url: '/api/auth/sign-up/email',
-      headers: { 'content-type': 'application/json' },
-      payload: { email, password: originalPassword, name },
-    });
-  });
-
-  afterEach(async () => {
-    await app.close();
+    await signUp(app, email, name, originalPassword);
   });
 
   it('sends a reset email for a registered user', async () => {
@@ -64,7 +59,8 @@ describe('Password reset endpoints', () => {
       payload: { email, redirectTo: REDIRECT_TO },
     });
 
-    expect(response.statusCode).toBe(200);
+    const { statusCode } = parseResponse<unknown>(response);
+    expect(statusCode).toBe(200);
     expect(sendEmailMock).toHaveBeenCalledTimes(1);
 
     const sent = lastSentEmail();
@@ -85,7 +81,8 @@ describe('Password reset endpoints', () => {
     });
 
     // Better Auth returns 200 whether the email exists or not (no enumeration).
-    expect(response.statusCode).toBe(200);
+    const { statusCode } = parseResponse<unknown>(response);
+    expect(statusCode).toBe(200);
     expect(sendEmailMock).not.toHaveBeenCalled();
   });
 
@@ -106,7 +103,7 @@ describe('Password reset endpoints', () => {
       payload: { newPassword, token },
     });
 
-    expect(resetResponse.statusCode).toBe(200);
+    expect(parseResponse<unknown>(resetResponse).statusCode).toBe(200);
 
     // New password works
     const signInNew = await app.inject({
@@ -115,7 +112,7 @@ describe('Password reset endpoints', () => {
       headers: { 'content-type': 'application/json' },
       payload: { email, password: newPassword },
     });
-    expect(signInNew.statusCode).toBe(200);
+    expect(parseResponse<unknown>(signInNew).statusCode).toBe(200);
 
     // Old password no longer works
     const signInOld = await app.inject({
@@ -124,7 +121,7 @@ describe('Password reset endpoints', () => {
       headers: { 'content-type': 'application/json' },
       payload: { email, password: originalPassword },
     });
-    expect(signInOld.statusCode).toBe(401);
+    expect(parseResponse<unknown>(signInOld).statusCode).toBe(401);
   });
 
   it('rejects an invalid token', async () => {
@@ -136,9 +133,9 @@ describe('Password reset endpoints', () => {
     });
 
     // Better Auth returns 4xx with an INVALID_TOKEN code for bad/expired tokens.
-    expect(response.statusCode).toBeGreaterThanOrEqual(400);
-    expect(response.statusCode).toBeLessThan(500);
-    const body = JSON.parse(response.body);
+    const { statusCode, body } = parseResponse<{ code?: string; message?: string }>(response);
+    expect(statusCode).toBeGreaterThanOrEqual(400);
+    expect(statusCode).toBeLessThan(500);
     expect(body.code ?? body.message).toBeDefined();
   });
 
@@ -157,7 +154,7 @@ describe('Password reset endpoints', () => {
       headers: { 'content-type': 'application/json' },
       payload: { newPassword, token },
     });
-    expect(first.statusCode).toBe(200);
+    expect(parseResponse<unknown>(first).statusCode).toBe(200);
 
     const second = await app.inject({
       method: 'POST',
@@ -165,6 +162,6 @@ describe('Password reset endpoints', () => {
       headers: { 'content-type': 'application/json' },
       payload: { newPassword: 'yetAnotherPw3', token },
     });
-    expect(second.statusCode).toBeGreaterThanOrEqual(400);
+    expect(parseResponse<unknown>(second).statusCode).toBeGreaterThanOrEqual(400);
   });
 });
