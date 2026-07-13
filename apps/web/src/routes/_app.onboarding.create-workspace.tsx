@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
 import { createWorkspace } from '../lib/workspaces';
 import { workspacesQueryOptions } from '../lib/workspace-queries';
@@ -13,6 +13,7 @@ export function CreateWorkspacePage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [name, setName] = useState('');
+  const createInFlight = useRef(false);
   const trimmedName = name.trim();
   const workspaceListQueryOptions = workspacesQueryOptions();
   const createMutation = useMutation({
@@ -27,12 +28,16 @@ export function CreateWorkspacePage() {
         params: { workspaceSlug: workspace.slug },
       });
     },
+    onSettled: () => {
+      createInFlight.current = false;
+    },
   });
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!trimmedName) return;
+    if (!trimmedName || createInFlight.current) return;
 
+    createInFlight.current = true;
     createMutation.reset();
     createMutation.mutate(trimmedName);
   };

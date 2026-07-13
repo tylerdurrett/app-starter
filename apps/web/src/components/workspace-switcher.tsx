@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { Button, Input } from '@repo/ui';
@@ -41,6 +41,7 @@ export function WorkspaceSwitcher({ activeContext, activeWorkspace }: WorkspaceS
 
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newName, setNewName] = useState('');
+  const createInFlight = useRef(false);
   const createMutation = useMutation({
     mutationFn: (workspaceName: string) => createWorkspace(workspaceName),
     onSuccess: async (workspace) => {
@@ -52,6 +53,9 @@ export function WorkspaceSwitcher({ activeContext, activeWorkspace }: WorkspaceS
         to: '/w/$workspaceSlug',
         params: { workspaceSlug: workspace.slug },
       });
+    },
+    onSettled: () => {
+      createInFlight.current = false;
     },
   });
 
@@ -96,8 +100,9 @@ export function WorkspaceSwitcher({ activeContext, activeWorkspace }: WorkspaceS
         const handleCreate = (e: React.FormEvent) => {
           e.preventDefault();
           const trimmed = newName.trim();
-          if (!trimmed || createMutation.isPending) return;
+          if (!trimmed || createInFlight.current) return;
 
+          createInFlight.current = true;
           createMutation.reset();
           createMutation.mutate(trimmed, { onSuccess: close });
         };

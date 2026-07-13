@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ComponentProps, ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -60,6 +60,16 @@ function createClient() {
       mutations: { retry: false },
     },
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function WorkspaceObserver({ label }: { label: string }) {
@@ -147,6 +157,37 @@ describe('workspace creation mutations', () => {
     expect(mocks.listWorkspaces).toHaveBeenCalledTimes(3);
   });
 
+  it('blocks rapid duplicate switcher submits while the POST is unresolved', async () => {
+    const user = userEvent.setup();
+    const request = deferred<Workspace>();
+    mocks.createWorkspace.mockReturnValue(request.promise);
+    mocks.listWorkspaces
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([createdWorkspaceWithRole]);
+    const client = createClient();
+
+    renderWithClient(client, <WorkspaceSwitcher activeContext={activeContext} />);
+    await waitFor(() => expect(mocks.listWorkspaces).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole('button', { name: 'Switch workspace' }));
+    await waitFor(() => expect(mocks.listWorkspaces).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole('button', { name: 'New workspace' }));
+    await user.type(screen.getByPlaceholderText('Workspace name'), 'New workspace');
+    const form = screen.getByPlaceholderText('Workspace name').closest('form')!;
+
+    act(() => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    await waitFor(() => expect(mocks.createWorkspace).toHaveBeenCalledOnce());
+    expect(mocks.listWorkspaces).toHaveBeenCalledTimes(2);
+    expect(mocks.navigate).not.toHaveBeenCalled();
+
+    await act(async () => request.resolve(createdWorkspace));
+    await waitFor(() => expect(mocks.navigate).toHaveBeenCalledOnce());
+    expect(mocks.listWorkspaces).toHaveBeenCalledTimes(3);
+  });
+
   it('refreshes the exact shared list once before onboarding navigation', async () => {
     const user = userEvent.setup();
     mocks.createWorkspace.mockResolvedValue(createdWorkspace);
@@ -208,6 +249,39 @@ describe('workspace creation mutations', () => {
     await user.click(screen.getByRole('button', { name: 'Create Workspace' }));
     await waitFor(() => expect(mocks.navigate).toHaveBeenCalledOnce());
     expect(mocks.createWorkspace).toHaveBeenCalledTimes(2);
+    expect(mocks.listWorkspaces).toHaveBeenCalledTimes(2);
+  });
+
+  it('blocks rapid duplicate onboarding submits while the POST is unresolved', async () => {
+    const user = userEvent.setup();
+    const request = deferred<Workspace>();
+    mocks.createWorkspace.mockReturnValue(request.promise);
+    mocks.listWorkspaces
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([createdWorkspaceWithRole]);
+    const client = createClient();
+
+    renderWithClient(
+      client,
+      <>
+        <WorkspaceObserver label="list" />
+        <CreateWorkspacePage />
+      </>,
+    );
+    await waitFor(() => expect(mocks.listWorkspaces).toHaveBeenCalledOnce());
+    await user.type(screen.getByLabelText('Workspace Name'), 'New workspace');
+    const form = screen.getByLabelText('Workspace Name').closest('form')!;
+
+    act(() => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    await waitFor(() => expect(mocks.createWorkspace).toHaveBeenCalledOnce());
+    expect(mocks.listWorkspaces).toHaveBeenCalledOnce();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+
+    await act(async () => request.resolve(createdWorkspace));
+    await waitFor(() => expect(mocks.navigate).toHaveBeenCalledOnce());
     expect(mocks.listWorkspaces).toHaveBeenCalledTimes(2);
   });
 });
