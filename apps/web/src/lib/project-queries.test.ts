@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 import { queryKeys } from './query-keys';
+import type { Project, ProjectWithRole, ProjectWithWorkspace } from './projects';
 import {
   accessibleProjectsQueryOptions,
   lastActiveProjectQueryOptions,
@@ -39,6 +40,9 @@ describe('navigation project query options', () => {
     const options = accessibleProjectsQueryOptions();
 
     expect(options.queryKey).toEqual(queryKeys.accessibleProjects());
+    expectTypeOf<ReturnType<typeof options.queryFn>>().toEqualTypeOf<
+      Promise<ProjectWithRole[]>
+    >();
     await expect(options.queryFn()).resolves.toEqual([{ id: 'project-1', slug: 'web' }]);
     expect(listProjects).toHaveBeenCalledWith();
   });
@@ -50,6 +54,10 @@ describe('navigation project query options', () => {
 
     expect(base.queryKey).toEqual(queryKeys.lastActiveProject());
     expect(validation.queryKey).toEqual(queryKeys.lastActiveProjectValidation(hint));
+    expectTypeOf<ReturnType<typeof base.queryFn>>().toEqualTypeOf<Promise<Project | null>>();
+    expectTypeOf<ReturnType<typeof validation.queryFn>>().toEqualTypeOf<
+      Promise<Project | null>
+    >();
     await Promise.all([base.queryFn(), validation.queryFn()]);
     expect(getLastActiveProject).toHaveBeenCalledTimes(2);
     expect(getLastActiveProject).toHaveBeenNthCalledWith(1);
@@ -94,7 +102,12 @@ describe('navigation project query options', () => {
 
 describe('projectQueryOptions', () => {
   it('uses the shared project detail query key', () => {
-    expect(projectQueryOptions('acme', 'web').queryKey).toEqual(queryKeys.project('acme', 'web'));
+    const options = projectQueryOptions('acme', 'web');
+
+    expect(options.queryKey).toEqual(queryKeys.project('acme', 'web'));
+    expectTypeOf<ReturnType<typeof options.queryFn>>().toEqualTypeOf<
+      Promise<ProjectWithWorkspace>
+    >();
   });
 
   it('queryFn calls getProject with the workspace and project slug', async () => {

@@ -1,5 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { queryKeys } from './query-keys';
+import type { ProjectWithRole } from './projects';
+import type { WorkspaceWithRole } from './workspaces';
 import {
   workspaceProjectsQueryOptions,
   workspaceQueryOptions,
@@ -27,6 +29,9 @@ describe('workspace query options', () => {
     const options = workspacesQueryOptions();
 
     expect(options.queryKey).toEqual(queryKeys.workspaces());
+    expectTypeOf<ReturnType<typeof options.queryFn>>().toEqualTypeOf<
+      Promise<WorkspaceWithRole[]>
+    >();
     await expect(options.queryFn()).resolves.toEqual([{ id: 'workspace-1', slug: 'acme' }]);
     expect(listWorkspaces).toHaveBeenCalledWith();
   });
@@ -35,6 +40,9 @@ describe('workspace query options', () => {
     const options = workspaceQueryOptions('acme');
 
     expect(options.queryKey).toEqual(queryKeys.workspace('acme'));
+    expectTypeOf<ReturnType<typeof options.queryFn>>().toEqualTypeOf<
+      Promise<WorkspaceWithRole>
+    >();
     await options.queryFn();
     expect(getWorkspace).toHaveBeenCalledWith('acme');
   });
@@ -43,6 +51,9 @@ describe('workspace query options', () => {
     const options = workspaceProjectsQueryOptions('acme');
 
     expect(options.queryKey).toEqual(queryKeys.projects('acme'));
+    expectTypeOf<ReturnType<typeof options.queryFn>>().toEqualTypeOf<
+      Promise<ProjectWithRole[]>
+    >();
     await options.queryFn();
     expect(listProjectsForWorkspace).toHaveBeenCalledWith('acme');
   });
