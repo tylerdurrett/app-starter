@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { QueryClient } from '@tanstack/react-query';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearAuthenticatedClientState } from './authenticated-client-state';
+import { readActiveContext, writeActiveContext } from './active-workspace';
+import { accessibleProjectsQueryOptions, lastActiveProjectQueryOptions } from './project-queries';
 import { resolveProject } from './project-resolver';
 import { getLastActiveProject, listProjects } from './projects';
 import { listWorkspaces } from './workspaces';
@@ -30,6 +34,12 @@ function project(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function createQueryClient() {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   getLastActiveProjectMock.mockResolvedValue(null);
@@ -37,67 +47,119 @@ beforeEach(() => {
   listWorkspacesMock.mockResolvedValue([]);
 });
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe('resolveProject', () => {
-  it('targets the nested workspace/project URL for the last-active project', async () => {
+  it.each([
+    {
+      state: 'last-active project',
+      lastActive: project({ slug: 'last-proj', workspaceSlug: 'last-ws' }),
+      projects: [],
+      workspaces: [],
+      calls: ['last-active'],
+      target: {
+        to: '/w/$workspaceSlug/p/$projectSlug',
+        params: { workspaceSlug: 'last-ws', projectSlug: 'last-proj' },
+      },
+    },
+    {
+      state: 'first accessible project',
+      lastActive: null,
+      projects: [project({ slug: 'first-proj', workspaceSlug: 'first-ws', role: 'owner' })],
+      workspaces: [],
+      calls: ['last-active', 'projects'],
+      target: {
+        to: '/w/$workspaceSlug/p/$projectSlug',
+        params: { workspaceSlug: 'first-ws', projectSlug: 'first-proj' },
+      },
+    },
+    {
+      state: 'first workspace without a project',
+      lastActive: null,
+      projects: [],
+      workspaces: [{ id: 'w1', name: 'Acme', slug: 'acme', role: 'owner' }],
+      calls: ['last-active', 'projects', 'workspaces'],
+      target: {
+        to: '/w/$workspaceSlug',
+        params: { workspaceSlug: 'acme' },
+      },
+    },
+    {
+      state: 'zero tenancy',
+      lastActive: null,
+      projects: [],
+      workspaces: [],
+      calls: ['last-active', 'projects', 'workspaces'],
+      target: { to: '/onboarding/create-workspace' },
+    },
+  ] as const)(
+    'preserves the ADR-0012 sequential fallback for $state',
+    async ({ lastActive, projects, workspaces, calls: expectedCalls, target }) => {
+      const calls: string[] = [];
+      getLastActiveProjectMock.mockImplementation(async () => {
+        calls.push('last-active');
+        return lastActive as never;
+      });
+      listProjectsMock.mockImplementation(async () => {
+        calls.push('projects');
+        return [...projects] as never;
+      });
+      listWorkspacesMock.mockImplementation(async () => {
+        calls.push('workspaces');
+        return [...workspaces] as never;
+      });
+
+      await expect(resolveProject(createQueryClient())).resolves.toEqual(target);
+      expect(calls).toEqual(expectedCalls);
+    },
+  );
+
+  it('reuses fresh QueryClient data during the same session', async () => {
+    const queryClient = createQueryClient();
+    const cached = project({ id: 'cached', slug: 'cached-project', workspaceSlug: 'cached-ws' });
+    queryClient.setQueryData(lastActiveProjectQueryOptions().queryKey, cached);
+
+    const target = await resolveProject(queryClient);
+
+    expect(target.params).toEqual({ workspaceSlug: 'cached-ws', projectSlug: 'cached-project' });
+    expect(getLastActiveProjectMock).not.toHaveBeenCalled();
+    expect(listProjectsMock).not.toHaveBeenCalled();
+  });
+
+  it('clears user A state before resolving user B from the network', async () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+      },
+    });
+    const queryClient = createQueryClient();
+    const userA = project({ id: 'user-a-project', slug: 'a-project', workspaceSlug: 'a-workspace' });
+    queryClient.setQueryData(lastActiveProjectQueryOptions().queryKey, userA);
+    queryClient.setQueryData(accessibleProjectsQueryOptions().queryKey, [userA]);
+    writeActiveContext({
+      workspaceSlug: 'a-workspace',
+      projectSlug: 'a-project',
+      projectId: 'user-a-project',
+    });
     getLastActiveProjectMock.mockResolvedValue(
-      project({ slug: 'last-proj', workspaceSlug: 'last-ws' }) as never,
+      project({ id: 'user-b-project', slug: 'b-project', workspaceSlug: 'b-workspace' }) as never,
     );
 
-    const target = await resolveProject();
+    await clearAuthenticatedClientState(queryClient);
+    const target = await resolveProject(queryClient);
 
-    expect(target).toEqual({
-      to: '/w/$workspaceSlug/p/$projectSlug',
-      params: { workspaceSlug: 'last-ws', projectSlug: 'last-proj' },
+    expect(readActiveContext()).toBeNull();
+    expect(target.params).toEqual({ workspaceSlug: 'b-workspace', projectSlug: 'b-project' });
+    expect(getLastActiveProjectMock).toHaveBeenCalledOnce();
+    expect(queryClient.getQueryData(accessibleProjectsQueryOptions().queryKey)).toBeUndefined();
+    expect(queryClient.getQueryData(lastActiveProjectQueryOptions().queryKey)).toMatchObject({
+      id: 'user-b-project',
     });
-    // First-project and workspace fallbacks must not be consulted when last-active resolves.
-    expect(listProjectsMock).not.toHaveBeenCalled();
-    expect(listWorkspacesMock).not.toHaveBeenCalled();
-  });
-
-  it('targets the nested workspace/project URL for the first project when no last-active', async () => {
-    listProjectsMock.mockResolvedValue([
-      project({ slug: 'first-proj', workspaceSlug: 'first-ws', role: 'owner' }) as never,
-    ]);
-
-    const target = await resolveProject();
-
-    expect(target).toEqual({
-      to: '/w/$workspaceSlug/p/$projectSlug',
-      params: { workspaceSlug: 'first-ws', projectSlug: 'first-proj' },
-    });
-    expect(listWorkspacesMock).not.toHaveBeenCalled();
-  });
-
-  it('falls through the chain when the last-active project access was revoked', async () => {
-    // The server re-checks access in getLastActiveProject and returns null when the
-    // stored last-active project was deleted or the user's access was revoked. The
-    // resolver must not resume it — it falls through to the next available project.
-    getLastActiveProjectMock.mockResolvedValue(null);
-    listProjectsMock.mockResolvedValue([
-      project({ slug: 'still-mine', workspaceSlug: 'still-ws', role: 'owner' }) as never,
-    ]);
-
-    const target = await resolveProject();
-
-    expect(target).toEqual({
-      to: '/w/$workspaceSlug/p/$projectSlug',
-      params: { workspaceSlug: 'still-ws', projectSlug: 'still-mine' },
-    });
-  });
-
-  it('falls back to the first workspace when the user has no projects', async () => {
-    listWorkspacesMock.mockResolvedValue([
-      { id: 'w1', name: 'Acme', slug: 'acme', role: 'owner' } as never,
-    ]);
-
-    const target = await resolveProject();
-
-    expect(target).toEqual({ to: '/w/$workspaceSlug', params: { workspaceSlug: 'acme' } });
-  });
-
-  it('falls back to onboarding when the user has no projects or workspaces', async () => {
-    const target = await resolveProject();
-
-    expect(target).toEqual({ to: '/onboarding/create-workspace' });
+    expect(queryClient.getQueryCache().findAll()).toHaveLength(1);
   });
 });

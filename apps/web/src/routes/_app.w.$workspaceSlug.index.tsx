@@ -2,11 +2,13 @@ import { createFileRoute, Link, getRouteApi, useNavigate } from '@tanstack/react
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle } from '@repo/ui';
-import { listProjectsForWorkspace, listWorkspaceMembers } from '../lib/workspaces';
+import { listWorkspaceMembers } from '../lib/workspaces';
 import { canWorkspace } from '../lib/permissions';
 import { queryKeys } from '../lib/query-keys';
+import { workspaceProjectsQueryOptions } from '../lib/workspace-queries';
 import { CreateProjectModal } from '../components/create-project-modal';
 import { Plus } from 'lucide-react';
+import { authenticatedQueryEnabled } from '../lib/authenticated-client-state';
 
 const workspaceRoute = getRouteApi('/_app/w/$workspaceSlug');
 
@@ -14,27 +16,25 @@ export const Route = createFileRoute('/_app/w/$workspaceSlug/')({
   component: WorkspaceHomePage,
 });
 
-function WorkspaceHomePage() {
+export function WorkspaceHomePage() {
+  const queryClient = useQueryClient();
   const { workspace } = workspaceRoute.useLoaderData();
   const { role } = workspace;
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
 
   const [showCreateModal, setShowCreateModal] = useState(false);
 
   // Server state lives in TanStack Query (ADR-0007); the gating loader owns only
   // the workspace detail, so the list reads happen here.
-  const projectsQuery = useQuery({
-    queryKey: queryKeys.projects(workspace.slug),
-    queryFn: () => listProjectsForWorkspace(workspace.slug),
-  });
+  const projectsQueryOptions = workspaceProjectsQueryOptions(workspace.slug);
+  const projectsQuery = useQuery(projectsQueryOptions);
   const projects = projectsQuery.data ?? [];
 
   const canListMembers = canWorkspace(role, 'workspace:members:list');
   const membersQuery = useQuery({
     queryKey: queryKeys.workspaceMembers(workspace.slug),
     queryFn: () => listWorkspaceMembers(workspace.slug),
-    enabled: canListMembers,
+    enabled: authenticatedQueryEnabled(queryClient, canListMembers),
   });
   const members = membersQuery.data ?? [];
 
@@ -60,16 +60,13 @@ function WorkspaceHomePage() {
               )}
             </CardHeader>
             <CardContent>
-              {projectsQuery.isPending && (
+              {projectsQuery.isPending ? (
                 <p className="text-sm text-muted-foreground">Loading...</p>
-              )}
-              {projectsQuery.error && (
+              ) : projectsQuery.isError ? (
                 <p className="text-sm text-destructive">Failed to load projects</p>
-              )}
-              {!projectsQuery.isPending && !projectsQuery.error && projects.length === 0 && (
+              ) : projects.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No projects yet.</p>
-              )}
-              {!projectsQuery.isPending && projects.length > 0 && (
+              ) : (
                 <ul className="space-y-2">
                   {projects.map((project) => (
                     <li key={project.id}>
@@ -158,9 +155,6 @@ function WorkspaceHomePage() {
         open={showCreateModal}
         onOpenChange={setShowCreateModal}
         onCreated={(project) => {
-          queryClient.invalidateQueries({
-            queryKey: queryKeys.projects(workspace.slug),
-          });
           navigate({
             to: '/w/$workspaceSlug/p/$projectSlug',
             params: { workspaceSlug: workspace.slug, projectSlug: project.slug },

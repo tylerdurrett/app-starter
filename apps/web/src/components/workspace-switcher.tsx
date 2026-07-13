@@ -1,15 +1,14 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { Button, Input } from '@repo/ui';
 import { Plus, Settings, User, LogOut, Check } from 'lucide-react';
-import {
-  listWorkspaces,
-  createWorkspace,
-  type WorkspaceWithRole,
-} from '../lib/workspaces';
+import { createWorkspace, type WorkspaceWithRole } from '../lib/workspaces';
 import { canWorkspace } from '../lib/permissions';
 import { signOut } from '../lib/auth-client';
-import { useActiveContext } from '../lib/active-workspace';
+import { type ActiveContext } from '../lib/active-workspace';
+import { completeSignOutTransition } from '../lib/auth-transitions';
+import { workspacesQueryOptions } from '../lib/workspace-queries';
 import {
   Selector,
   SelectorDivider,
@@ -18,66 +17,70 @@ import {
   selectorRowClass,
 } from './selector';
 
-export function WorkspaceSwitcher() {
+interface WorkspaceSwitcherProps {
+  activeContext: ActiveContext;
+  activeWorkspace?: WorkspaceWithRole;
+}
+
+export function WorkspaceSwitcher({ activeContext, activeWorkspace }: WorkspaceSwitcherProps) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   // Shared derivation: URL first, then localStorage fallback so the switcher
   // keeps its active workspace on workspace-less routes like /account.
   // `urlProjectWorkspaceName` feeds the project-only-access pill and is only
   // non-null when we're actually on /p/:slug (not when falling back to storage).
-  const { workspaceSlug: activeSlug, fromUrl, urlProjectWorkspaceName: contextualName } = useActiveContext();
-
-  const [workspaces, setWorkspaces] = useState<WorkspaceWithRole[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [fetchError, setFetchError] = useState('');
+  const {
+    workspaceSlug: activeSlug,
+    fromUrl,
+    urlProjectWorkspaceName: contextualName,
+  } = activeContext;
+  const workspaceListQueryOptions = workspacesQueryOptions();
+  const workspacesQuery = useQuery(workspaceListQueryOptions);
+  const workspaces = workspacesQuery.data ?? [];
 
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newName, setNewName] = useState('');
-  const [isCreating, setIsCreating] = useState(false);
-  const [createError, setCreateError] = useState('');
-
-  const fetchIdRef = useRef(0);
+  const createInFlight = useRef(false);
+  const createMutation = useMutation({
+    mutationFn: (workspaceName: string) => createWorkspace(workspaceName),
+    onSuccess: async (workspace) => {
+      await queryClient.invalidateQueries({
+        queryKey: workspaceListQueryOptions.queryKey,
+        exact: true,
+      });
+      await navigate({
+        to: '/w/$workspaceSlug',
+        params: { workspaceSlug: workspace.slug },
+      });
+    },
+    onSettled: () => {
+      createInFlight.current = false;
+    },
+  });
 
   // When there's no URL context (e.g. /account) and no remembered slug, fall
   // back to the first available workspace so the switcher trigger always shows
   // something meaningful instead of the generic "Workspace" placeholder.
   const matchedWorkspace = workspaces.find((ws) => ws.slug === activeSlug);
-  const activeWorkspace = matchedWorkspace ?? (!fromUrl ? workspaces[0] : undefined);
-  const hasDirectAccess = Boolean(activeWorkspace);
-  const displayName = activeWorkspace?.name ?? contextualName;
+  const selectedWorkspace =
+    activeWorkspace ?? matchedWorkspace ?? (!fromUrl ? workspaces[0] : undefined);
+  const hasDirectAccess = Boolean(selectedWorkspace);
+  const displayName = selectedWorkspace?.name ?? contextualName;
 
   const canAccessWorkspaceSettings =
-    hasDirectAccess && activeWorkspace && canWorkspace(activeWorkspace.role, 'workspace:read');
+    hasDirectAccess && selectedWorkspace && canWorkspace(selectedWorkspace.role, 'workspace:read');
 
   const resetCreateForm = useCallback(() => {
     setShowCreateForm(false);
     setNewName('');
-    setCreateError('');
-  }, []);
-
-  const fetchWorkspaces = useCallback(() => {
-    const id = ++fetchIdRef.current;
-    setLoading(true);
-    setFetchError('');
-    listWorkspaces()
-      .then((data) => {
-        if (fetchIdRef.current === id) setWorkspaces(data);
-      })
-      .catch(() => {
-        if (fetchIdRef.current === id) setFetchError('Failed to load workspaces');
-      })
-      .finally(() => {
-        if (fetchIdRef.current === id) setLoading(false);
-      });
-  }, []);
-
-  useEffect(() => {
-    fetchWorkspaces();
-  }, [fetchWorkspaces]);
+    createMutation.reset();
+  }, [createMutation]);
 
   const handleLogout = async () => {
-    await signOut();
-    window.location.href = '/login';
+    await completeSignOutTransition(queryClient, signOut, () => {
+      window.location.href = '/login';
+    });
   };
 
   return (
@@ -88,48 +91,40 @@ export function WorkspaceSwitcher() {
         title: displayName ?? 'Workspace',
         avatarLabel: displayName ? displayName[0]!.toUpperCase() : 'W',
       }}
-      onOpen={fetchWorkspaces}
+      onOpen={() => {
+        void workspacesQuery.refetch({ cancelRefetch: false });
+      }}
       onClose={resetCreateForm}
     >
       {({ close }) => {
-        const handleCreate = async (e: React.FormEvent) => {
+        const handleCreate = (e: React.FormEvent) => {
           e.preventDefault();
           const trimmed = newName.trim();
-          if (!trimmed) return;
+          if (!trimmed || createInFlight.current) return;
 
-          setCreateError('');
-          setIsCreating(true);
-          try {
-            const ws = await createWorkspace(trimmed);
-            close();
-            await navigate({ to: '/w/$workspaceSlug', params: { workspaceSlug: ws.slug } });
-          } catch {
-            setCreateError('Failed to create workspace');
-          } finally {
-            setIsCreating(false);
-          }
+          createInFlight.current = true;
+          createMutation.reset();
+          createMutation.mutate(trimmed, { onSuccess: close });
         };
 
         return (
           <>
             <SelectorSectionLabel>Workspaces</SelectorSectionLabel>
 
-            {loading && (
-              <div className="px-2 py-3 text-sm text-muted-foreground text-center">
-                Loading...
-              </div>
+            {workspacesQuery.isPending && (
+              <div className="px-2 py-3 text-sm text-muted-foreground text-center">Loading...</div>
             )}
 
-            {fetchError && (
+            {workspacesQuery.isError && workspacesQuery.data === undefined && (
               <div className="px-2 py-3 text-sm text-destructive text-center">
-                {fetchError}
+                Failed to load workspaces
               </div>
             )}
 
-            {!loading && !fetchError && (
+            {workspacesQuery.data !== undefined && (
               <ul className="space-y-0.5">
                 {workspaces.map((ws) => {
-                  const isActive = ws.slug === activeWorkspace?.slug;
+                  const isActive = ws.slug === selectedWorkspace?.slug;
                   return (
                     <li key={ws.id}>
                       <Link
@@ -161,9 +156,7 @@ export function WorkspaceSwitcher() {
                   </li>
                 )}
                 {workspaces.length === 0 && !contextualName && (
-                  <li className="px-2 py-1.5 text-sm text-muted-foreground">
-                    No workspaces yet
-                  </li>
+                  <li className="px-2 py-1.5 text-sm text-muted-foreground">No workspaces yet</li>
                 )}
               </ul>
             )}
@@ -185,29 +178,31 @@ export function WorkspaceSwitcher() {
                   placeholder="Workspace name"
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
-                  disabled={isCreating}
+                  disabled={createMutation.isPending}
                   required
                   autoFocus
                   className="h-8 text-sm"
                 />
-                {createError && (
-                  <div className="text-xs text-destructive">{createError}</div>
+                {createMutation.isError && (
+                  <div className="text-xs text-destructive" role="alert">
+                    Failed to create workspace
+                  </div>
                 )}
                 <div className="flex gap-2">
                   <Button
                     type="submit"
                     size="sm"
-                    disabled={isCreating || !newName.trim()}
+                    disabled={createMutation.isPending || !newName.trim()}
                     className="flex-1"
                   >
-                    {isCreating ? 'Creating...' : 'Create'}
+                    {createMutation.isPending ? 'Creating...' : 'Create'}
                   </Button>
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
                     onClick={resetCreateForm}
-                    disabled={isCreating}
+                    disabled={createMutation.isPending}
                   >
                     Cancel
                   </Button>
@@ -215,12 +210,12 @@ export function WorkspaceSwitcher() {
               </form>
             )}
 
-            {activeWorkspace && canAccessWorkspaceSettings && (
+            {selectedWorkspace && canAccessWorkspaceSettings && (
               <>
                 <SelectorDivider />
                 <Link
                   to="/w/$workspaceSlug/settings"
-                  params={{ workspaceSlug: activeWorkspace.slug }}
+                  params={{ workspaceSlug: selectedWorkspace.slug }}
                   onClick={close}
                   className="flex items-center gap-2 px-2 py-1.5 rounded text-sm w-full text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
                 >

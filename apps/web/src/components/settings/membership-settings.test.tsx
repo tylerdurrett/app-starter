@@ -9,6 +9,7 @@ import {
   type MembershipMember,
   type MembershipSettingsAdapter,
 } from './membership-settings';
+import { establishAuthenticatedClientOwner } from '../../lib/authenticated-client-state';
 
 const ada: MembershipMember = {
   userId: 'user-1',
@@ -52,6 +53,8 @@ function renderMembership(
       mutations: { retry: false },
     },
   });
+  window.localStorage.setItem('authenticatedClientOwner', 'test-user');
+  void establishAuthenticatedClientOwner(queryClient, 'test-user');
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );

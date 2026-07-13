@@ -1,33 +1,45 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
-import { useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useRef, useState } from 'react';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
 import { createWorkspace } from '../lib/workspaces';
+import { workspacesQueryOptions } from '../lib/workspace-queries';
 
 export const Route = createFileRoute('/_app/onboarding/create-workspace')({
   component: CreateWorkspacePage,
 });
 
-function CreateWorkspacePage() {
+export function CreateWorkspacePage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [name, setName] = useState('');
-  const [error, setError] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const createInFlight = useRef(false);
   const trimmedName = name.trim();
+  const workspaceListQueryOptions = workspacesQueryOptions();
+  const createMutation = useMutation({
+    mutationFn: (workspaceName: string) => createWorkspace(workspaceName),
+    onSuccess: async (workspace) => {
+      await queryClient.invalidateQueries({
+        queryKey: workspaceListQueryOptions.queryKey,
+        exact: true,
+      });
+      await navigate({
+        to: '/w/$workspaceSlug',
+        params: { workspaceSlug: workspace.slug },
+      });
+    },
+    onSettled: () => {
+      createInFlight.current = false;
+    },
+  });
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!trimmedName) return;
+    if (!trimmedName || createInFlight.current) return;
 
-    setError('');
-    setIsLoading(true);
-
-    try {
-      const ws = await createWorkspace(trimmedName);
-      await navigate({ to: '/w/$workspaceSlug', params: { workspaceSlug: ws.slug } });
-    } catch {
-      setError('Failed to create workspace. Please try again.');
-      setIsLoading(false);
-    }
+    createInFlight.current = true;
+    createMutation.reset();
+    createMutation.mutate(trimmedName);
   };
 
   return (
@@ -53,23 +65,23 @@ function CreateWorkspacePage() {
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   required
-                  disabled={isLoading}
+                  disabled={createMutation.isPending}
                   autoFocus
                 />
               </div>
 
-              {error && (
-                <div className="text-sm text-destructive text-center">
-                  {error}
+              {createMutation.isError && (
+                <div className="text-sm text-destructive text-center" role="alert">
+                  Failed to create workspace. Please try again.
                 </div>
               )}
 
               <Button
                 className="w-full"
-                disabled={isLoading || !trimmedName}
-                onClick={handleSubmit as React.MouseEventHandler<HTMLButtonElement>}
+                type="submit"
+                disabled={createMutation.isPending || !trimmedName}
               >
-                {isLoading ? 'Creating...' : 'Create Workspace'}
+                {createMutation.isPending ? 'Creating...' : 'Create Workspace'}
               </Button>
             </form>
           </CardContent>

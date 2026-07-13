@@ -137,7 +137,7 @@ describe('Workspace settings adapters', () => {
     await adapters.deletion?.onDeleted();
 
     expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: queryKeys.workspaces() });
-    expect(dependencies.resolveDestination).toHaveBeenCalledOnce();
+    expect(dependencies.resolveDestination).toHaveBeenCalledWith(queryClient);
     expect(navigate).toHaveBeenCalledWith(destination);
   });
 

@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
+import { useQuery } from '@tanstack/react-query';
 import { Plus, Settings } from 'lucide-react';
-import { listProjectsForWorkspace } from '../lib/workspaces';
-import { type ProjectWithRole } from '../lib/projects';
 import { canWorkspace, type WorkspaceRole } from '../lib/permissions';
+import { workspaceProjectsQueryOptions } from '../lib/workspace-queries';
 import { CreateProjectModal } from './create-project-modal';
 import {
   Selector,
@@ -25,34 +25,12 @@ export function ProjectSwitcher({
   activeProjectSlug,
 }: ProjectSwitcherProps) {
   const navigate = useNavigate();
-  const [projects, setProjects] = useState<ProjectWithRole[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [fetchError, setFetchError] = useState('');
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const fetchIdRef = useRef(0);
+  const projectsQueryOptions = workspaceProjectsQueryOptions(workspaceSlug);
+  const projectsQuery = useQuery(projectsQueryOptions);
+  const projects = projectsQuery.data ?? [];
 
   const canCreate = canWorkspace(workspaceRole, 'projects:create');
-
-  const fetchProjects = useCallback(() => {
-    const id = ++fetchIdRef.current;
-    setLoading(true);
-    setFetchError('');
-    listProjectsForWorkspace(workspaceSlug)
-      .then((data) => {
-        if (fetchIdRef.current === id) setProjects(data);
-      })
-      .catch(() => {
-        if (fetchIdRef.current === id) setFetchError('Failed to load projects');
-      })
-      .finally(() => {
-        if (fetchIdRef.current === id) setLoading(false);
-      });
-  }, [workspaceSlug]);
-
-  // Fetch on mount so the trigger reflects the active project before the popover opens
-  useEffect(() => {
-    fetchProjects();
-  }, [fetchProjects]);
 
   const activeProject = projects.find((p) => p.slug === activeProjectSlug);
   const triggerAvatar = activeProject?.name[0]?.toUpperCase() ?? 'P';
@@ -67,25 +45,27 @@ export function ProjectSwitcher({
           avatarLabel: triggerAvatar,
           muted: !activeProject,
         }}
-        onOpen={fetchProjects}
+        onOpen={() => {
+          void projectsQuery.refetch({ cancelRefetch: false });
+        }}
       >
         {({ close }) => (
           <>
             <SelectorSectionLabel>Projects</SelectorSectionLabel>
 
-            {loading && (
+            {projectsQuery.isPending && (
               <div className="px-2 py-3 text-sm text-muted-foreground text-center">
                 Loading...
               </div>
             )}
 
-            {fetchError && (
+            {projectsQuery.isError && (
               <div className="px-2 py-3 text-sm text-destructive text-center">
-                {fetchError}
+                Failed to load projects
               </div>
             )}
 
-            {!loading && !fetchError && (
+            {!projectsQuery.isPending && !projectsQuery.isError && (
               <ul className="space-y-0.5">
                 {projects.map((project) => {
                   const isActive = project.slug === activeProjectSlug;
@@ -150,11 +130,6 @@ export function ProjectSwitcher({
         open={showCreateModal}
         onOpenChange={setShowCreateModal}
         onCreated={(project) => {
-          setProjects((prev) =>
-            prev.some((p) => p.id === project.id)
-              ? prev
-              : [...prev, { ...project, role: 'owner' }],
-          );
           navigate({
             to: '/w/$workspaceSlug/p/$projectSlug',
             params: { workspaceSlug, projectSlug: project.slug },

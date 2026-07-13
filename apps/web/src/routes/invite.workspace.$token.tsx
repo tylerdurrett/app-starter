@@ -1,10 +1,12 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle } from '@repo/ui';
 import { useSession, signOut } from '../lib/auth-client';
 import { getWorkspaceInviteByToken, acceptWorkspaceInviteByToken } from '../lib/workspaces';
 import { ApiError } from '../lib/api';
 import type { WorkspaceInviteMetadata } from '../lib/workspaces';
+import { completeSignOutTransition } from '../lib/auth-transitions';
 
 export const Route = createFileRoute('/invite/workspace/$token')({
   loader: async ({ params }): Promise<WorkspaceInviteMetadata | null> => {
@@ -63,6 +65,7 @@ function PendingInviteView({ invite }: { invite: WorkspaceInviteMetadata }) {
   const { token } = Route.useParams();
   const session = useSession();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   const [isAccepting, setIsAccepting] = useState(false);
   const [acceptError, setAcceptError] = useState('');
@@ -89,9 +92,10 @@ function PendingInviteView({ invite }: { invite: WorkspaceInviteMetadata }) {
   };
 
   const handleSignOut = async () => {
-    await signOut();
-    // useSession maintains internal state that doesn't clear on signOut alone
-    window.location.reload();
+    await completeSignOutTransition(queryClient, signOut, () => {
+      // useSession maintains internal state that doesn't clear on signOut alone
+      window.location.reload();
+    });
   };
 
   return (

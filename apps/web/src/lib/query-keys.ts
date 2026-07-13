@@ -21,11 +21,21 @@ export const queryKeys = {
 
   // --- Projects (scoped by workspaceSlug, then projectSlug) ---
   projects: (workspaceSlug: string) => ['projects', workspaceSlug] as const,
+  accessibleProjects: () => ['accessible-projects'] as const,
   project: (workspaceSlug: string, slug: string) => ['project', workspaceSlug, slug] as const,
   projectMembers: (workspaceSlug: string, slug: string) =>
     ['project', workspaceSlug, slug, 'members'] as const,
   projectInvites: (workspaceSlug: string, slug: string) =>
     ['project', workspaceSlug, slug, 'invites'] as const,
+  lastActiveProject: () => ['last-active-project'] as const,
+  lastActiveProjectValidation: (hint: LastActiveProjectHint) =>
+    [
+      ...queryKeys.lastActiveProject(),
+      'validation',
+      hint.workspaceSlug,
+      hint.projectSlug,
+      hint.projectId,
+    ] as const,
 
   // --- Integrations (scoped by workspaceSlug, then integrationId) ---
   integrations: (slug: string) => ['integrations', slug] as const,
@@ -35,5 +45,11 @@ export const queryKeys = {
   // --- OAuth consent client info (scoped by client_id) ---
   oauthClient: (clientId: string) => ['oauth-client', clientId] as const,
 } as const;
+
+export type LastActiveProjectHint = {
+  workspaceSlug: string;
+  projectSlug: string;
+  projectId: string | null;
+};
 
 export type QueryKeys = typeof queryKeys;
