@@ -1,7 +1,6 @@
-import { db, workspaceInvites, workspaceMemberships, workspaces, users } from '@repo/db';
-import { eq, and } from 'drizzle-orm';
+import { db, workspaceInvites, workspaceMemberships, workspaces } from '@repo/db';
+import { eq } from 'drizzle-orm';
 import {
-  ServiceError,
   listInvites as sharedListInvites,
   createInvite as sharedCreateInvite,
   revokeInvite as sharedRevokeInvite,
@@ -12,38 +11,7 @@ import {
 } from '../tenancy/index.js';
 import { resolveWorkspaceAndRole } from './service.js';
 import type { WorkspacePermission } from './permissions.js';
-import type { WorkspaceInvite } from '@repo/shared';
-
-/**
- * Project a freshly-created invite row onto the shared `WorkspaceInvite`
- * contract. The shared invite lifecycle types its tables as bare PgTable
- * (#66), so the returned row is loosely typed; this mapper is the single
- * place that narrows it to the client-facing column allow-list
- * (id/email/role/status/expiresAt/createdAt) and converts Date→ISO string.
- * Internal columns (tokenHash, workspaceId/invitedByUserId FKs) are dropped.
- *
- * `invitedByName` is supplied explicitly by the caller — the raw insert row
- * carries `invitedByUserId`, not the joined actor name.
- */
-export function toWorkspaceInvite(row: unknown, invitedByName: string): WorkspaceInvite {
-  const invite = row as {
-    id: string;
-    email: string;
-    role: string;
-    status: string;
-    expiresAt: Date;
-    createdAt: Date;
-  };
-  return {
-    id: invite.id,
-    email: invite.email,
-    role: invite.role as WorkspaceInvite['role'],
-    status: invite.status as WorkspaceInvite['status'],
-    expiresAt: invite.expiresAt.toISOString(),
-    createdAt: invite.createdAt.toISOString(),
-    invitedByName,
-  };
-}
+import { workspaceInviteMetadataSchema, type WorkspaceInviteMetadata } from '@repo/shared';
 
 /** Token-metadata projection returned by getInviteByToken for the workspace level. */
 interface WorkspaceInviteTokenMeta {
@@ -66,6 +34,7 @@ interface WorkspaceAcceptResult {
 const config: InviteLifecycleConfig<
   WorkspacePermission,
   WorkspaceInviteTokenMeta,
+  WorkspaceInviteMetadata,
   WorkspaceAcceptResult
 > = {
   entityLabel: 'workspace',
@@ -109,36 +78,15 @@ const config: InviteLifecycleConfig<
       .where(eq(workspaceInvites.tokenHash, tokenHash));
     return invite;
   },
-  // Workspace revoke: fetch by (id, workspaceId) with NO status filter, throw
-  // NOT_FOUND when absent and CONFLICT when non-pending, then a VOID update.
-  async revoke(workspaceId, inviteId) {
-    const [invite] = await db
-      .select()
-      .from(workspaceInvites)
-      .where(and(eq(workspaceInvites.id, inviteId), eq(workspaceInvites.workspaceId, workspaceId)));
-
-    if (!invite) throw new ServiceError('NOT_FOUND', 'Invite not found');
-
-    if (invite.status !== 'pending') {
-      throw new ServiceError('CONFLICT', 'Invite is not pending');
-    }
-
-    await db
-      .update(workspaceInvites)
-      .set({ status: 'revoked' })
-      .where(eq(workspaceInvites.id, inviteId));
-  },
-  // Workspace email guard: load the actor, throw NOT_FOUND for a missing user,
-  // then compare the normalized stored email against the invite.
-  async emailGuard(userId, inviteEmail) {
-    const [actor] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId));
-
-    if (!actor) throw new ServiceError('NOT_FOUND', 'User not found');
-
-    if (actor.email.toLowerCase().trim() !== inviteEmail) {
-      throw new ServiceError('FORBIDDEN', 'This invite is for a different email address');
-    }
-  },
+  buildTokenMetadata: (invite) =>
+    workspaceInviteMetadataSchema.parse({
+      inviteId: invite.id,
+      email: invite.email,
+      status: invite.status,
+      expiresAt: invite.expiresAt.toISOString(),
+      workspaceName: invite.workspaceName,
+      workspaceSlug: invite.workspaceSlug,
+    }),
   membershipEntityId: (invite) => invite.workspaceId,
   buildAcceptResult: (invite) => ({
     workspaceId: invite.workspaceId,
@@ -165,9 +113,7 @@ export function createInvite(
 }
 
 export function revokeInvite(slug: string, actorUserId: string, inviteId: string): Promise<void> {
-  return sharedRevokeInvite(config, resolveWorkspace(slug, actorUserId), inviteId).then(
-    () => undefined,
-  );
+  return sharedRevokeInvite(config, resolveWorkspace(slug, actorUserId), inviteId);
 }
 
 export function getInviteByToken(token: string) {

@@ -11,7 +11,7 @@ import {
   listMembers,
   removeMember,
 } from '../workspaces/service.js';
-import { listInvites, createInvite, revokeInvite, toWorkspaceInvite } from '../workspaces/invites.js';
+import { listInvites, createInvite, revokeInvite } from '../workspaces/invites.js';
 import { listAuthorizedProjectsForUser } from '../projects/resolver.js';
 
 interface WorkspaceSlugParams {
@@ -104,11 +104,8 @@ const workspaceRoutes: FastifyPluginAsync = async (app) => {
         role: request.body.role
       });
       const inviteUrl = `${config.webOrigin}/invite/workspace/${token}`;
-      // Project onto the shared contract via the single named mapper, which
-      // absorbs the loose PgTable narrowing (#66) and drops internal columns
-      // (tokenHash, FKs). invitedByName comes from the acting user.
       const result: WorkspaceInviteCreateResult = {
-        invite: toWorkspaceInvite(invite, user.name),
+        invite,
         inviteUrl,
       };
       return reply.status(201).send(result);

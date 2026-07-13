@@ -38,6 +38,7 @@ import {
   createWorkspaceViaService,
   signUp,
 } from './helpers.js';
+import { hashToken } from '../src/tenancy/invites.js';
 
 // ---- helpers ----
 
@@ -447,7 +448,7 @@ describe('last active project', () => {
 
 describe('invites', () => {
   describe('createInvite', () => {
-    it('owner can create invite with default member role', async () => {
+    it('returns the exact safe invite and persists only its token hash and entity FK', async () => {
       const proj = await createProjectForTest('Invite Create Proj', aliceId);
       const { invite, token } = await createInvite(
         proj.slug,
@@ -458,11 +459,65 @@ describe('invites', () => {
         workspaceSlug,
       );
 
-      expect(invite.email).toBe('invitee-p@test.com');
-      expect(invite.status).toBe('pending');
-      expect(invite.role).toBe('member');
-      expect(token).toBeTruthy();
-      expect(invite.tokenHash).not.toBe(token);
+      expect(Object.keys(invite).sort()).toEqual([
+        'createdAt',
+        'email',
+        'expiresAt',
+        'id',
+        'invitedByName',
+        'role',
+        'status',
+      ]);
+      expect(invite).toMatchObject({
+        email: 'invitee-p@test.com',
+        status: 'pending',
+        role: 'member',
+        invitedByName: 'Alice',
+      });
+      const [stored] = await db
+        .select()
+        .from(projectInvites)
+        .where(eq(projectInvites.id, invite.id));
+      expect(stored.projectId).toBe(proj.id);
+      expect(stored.invitedByUserId).toBe(aliceId);
+      expect(stored.tokenHash).toBe(hashToken(token));
+      expect(stored.tokenHash).not.toBe(token);
+    });
+
+    it('rejects a null-name inviter without inserting an invite', async () => {
+      const ts = Date.now();
+      const inviter = await signUp(app, `nameless-p-${ts}@test.com`, 'Temporary');
+      const ws = await createWorkspaceForTest('Nameless Project Workspace', inviter.userId);
+      const proj = await createProjectForTest('Nameless Inviter Project', inviter.userId, {
+        wsId: ws.id,
+      });
+      await db.update(users).set({ name: null }).where(eq(users.id, inviter.userId));
+
+      await expect(
+        createInvite(proj.slug, inviter.userId, { email: 'not-created-p@test.com' }, ws.slug),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+      const rows = await db
+        .select()
+        .from(projectInvites)
+        .where(eq(projectInvites.projectId, proj.id));
+      expect(rows).toHaveLength(0);
+    });
+
+    it('returns NOT_FOUND for a missing inviter without inserting an invite', async () => {
+      const proj = await createProjectForTest('Missing Inviter Project', aliceId);
+      await expect(
+        createInvite(
+          proj.slug,
+          'missing-inviter-id',
+          { email: 'not-created-missing-p@test.com' },
+          workspaceSlug,
+        ),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      const rows = await db
+        .select()
+        .from(projectInvites)
+        .where(eq(projectInvites.projectId, proj.id));
+      expect(rows).toHaveLength(0);
     });
 
     it('accepts manager role on invite creation', async () => {
@@ -576,10 +631,35 @@ describe('invites', () => {
         workspaceSlug,
       );
 
-      await revokeInvite(proj.slug, aliceId, invite.id, workspaceSlug);
+      await expect(
+        revokeInvite(proj.slug, aliceId, invite.id, workspaceSlug),
+      ).resolves.toBeUndefined();
 
       const list = await listInvites(proj.slug, aliceId, workspaceSlug);
       expect(list.find((i) => i.id === invite.id)).toBeUndefined();
+    });
+
+    it('revoking a missing invite throws NOT_FOUND', async () => {
+      const proj = await createProjectForTest('Invite Revoke Missing Proj', aliceId);
+      await expect(
+        revokeInvite(proj.slug, aliceId, 'missing-invite', workspaceSlug),
+      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    });
+
+    it('revoking a revoked invite throws CONFLICT and leaves it revoked', async () => {
+      const proj = await createProjectForTest('Invite Revoke Twice Proj', aliceId);
+      const { invite, token } = await createInvite(
+        proj.slug,
+        aliceId,
+        { email: 'revoked-twice-p@test.com' },
+        workspaceSlug,
+      );
+      await revokeInvite(proj.slug, aliceId, invite.id, workspaceSlug);
+
+      await expect(
+        revokeInvite(proj.slug, aliceId, invite.id, workspaceSlug),
+      ).rejects.toMatchObject({ code: 'CONFLICT' });
+      expect((await getInviteByToken(token)).status).toBe('revoked');
     });
 
     it('member cannot revoke (FORBIDDEN)', async () => {
@@ -612,6 +692,17 @@ describe('invites', () => {
       expect(summary.email).toBe('token-p@test.com');
       expect(summary.projectName).toBe('Token Lookup Proj');
       expect(summary.status).toBe('pending');
+      expect(Object.keys(summary).sort()).toEqual([
+        'email',
+        'expiresAt',
+        'inviteId',
+        'projectName',
+        'projectSlug',
+        'status',
+        'workspaceName',
+        'workspaceSlug',
+      ]);
+      expect(new Date(summary.expiresAt).toISOString()).toBe(summary.expiresAt);
     });
 
     it('throws NOT_FOUND for invalid token', async () => {
@@ -655,17 +746,34 @@ describe('invites', () => {
 
       const summary = await getInviteByToken(token);
       expect(summary.status).toBe('pending');
-      expect(summary.expiresAt.getTime()).toBeLessThan(Date.now());
+      expect(new Date(summary.expiresAt).getTime()).toBeLessThan(Date.now());
+      expect(Object.keys(summary)).not.toContain('projectId');
     });
   });
 
   describe('acceptInvite', () => {
-    it('correct email user can accept and gets membership', async () => {
+    it('normalizes both stored user and invite emails before accepting', async () => {
       const proj = await createProjectForTest('Accept Test Proj', aliceId);
-      const { token } = await createInvite(proj.slug, aliceId, { email: bobEmail }, workspaceSlug);
+      const { token, invite } = await createInvite(
+        proj.slug,
+        aliceId,
+        { email: `  ${bobEmail.toUpperCase()}  ` },
+        workspaceSlug,
+      );
+      await db
+        .update(users)
+        .set({ email: `  ${bobEmail.toUpperCase()}  ` })
+        .where(eq(users.id, bobId));
 
       const result = await acceptInvite(token, bobId);
-      expect(result.projectSlug).toBe(proj.slug);
+      expect(result).toEqual({ projectId: proj.id, projectSlug: proj.slug });
+
+      const [storedInvite] = await db
+        .select()
+        .from(projectInvites)
+        .where(eq(projectInvites.id, invite.id));
+      expect(storedInvite.email).toBe(bobEmail);
+      expect(storedInvite.status).toBe('accepted');
 
       const members = await listMembers(proj.slug, aliceId, workspaceSlug);
       const bobMember = members.find((m) => m.userId === bobId);
@@ -674,6 +782,8 @@ describe('invites', () => {
 
       const summary = await getInviteByToken(token);
       expect(summary.status).toBe('accepted');
+
+      await db.update(users).set({ email: bobEmail }).where(eq(users.id, bobId));
     });
 
     it('manager-role invite grants manager membership on accept', async () => {
@@ -711,6 +821,49 @@ describe('invites', () => {
       await expect(acceptInvite(token, bobId)).rejects.toMatchObject({
         code: 'FORBIDDEN',
       });
+    });
+
+    it('missing accepting user throws NOT_FOUND without membership or status changes', async () => {
+      const proj = await createProjectForTest('Accept Missing User Proj', aliceId);
+      const { token, invite } = await createInvite(
+        proj.slug,
+        aliceId,
+        { email: 'missing-user-p@test.com' },
+        workspaceSlug,
+      );
+
+      await expect(acceptInvite(token, 'missing-user-id')).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+      const memberships = await db
+        .select()
+        .from(projectMemberships)
+        .where(
+          and(
+            eq(projectMemberships.projectId, proj.id),
+            eq(projectMemberships.userId, 'missing-user-id'),
+          ),
+        );
+      const [stored] = await db
+        .select()
+        .from(projectInvites)
+        .where(eq(projectInvites.id, invite.id));
+      expect(memberships).toHaveLength(0);
+      expect(stored.status).toBe('pending');
+    });
+
+    it('accepted invite cannot be revoked and remains accepted', async () => {
+      const proj = await createProjectForTest('Accept Then Revoke Proj', aliceId);
+      const ts = Date.now();
+      const email = `accepted-revoke-p-${ts}@test.com`;
+      const actor = await signUp(app, email, 'Accepted Revoke');
+      const { token, invite } = await createInvite(proj.slug, aliceId, { email }, workspaceSlug);
+      await acceptInvite(token, actor.userId);
+
+      await expect(
+        revokeInvite(proj.slug, aliceId, invite.id, workspaceSlug),
+      ).rejects.toMatchObject({ code: 'CONFLICT' });
+      expect((await getInviteByToken(token)).status).toBe('accepted');
     });
 
     it('accepting already-accepted invite throws CONFLICT', async () => {
@@ -786,8 +939,12 @@ describe('invites', () => {
       );
       expect(invite.email).toBe('matchinv@test.com');
       // The invite must attach to the wsB project, not the same-slug wsA project.
-      expect(invite.projectId).toBe(projB.id);
-      expect(invite.projectId).not.toBe(projA.id);
+      const [stored] = await db
+        .select({ projectId: projectInvites.projectId })
+        .from(projectInvites)
+        .where(eq(projectInvites.id, invite.id));
+      expect(stored.projectId).toBe(projB.id);
+      expect(stored.projectId).not.toBe(projA.id);
     });
 
     it('createInvite preserves FORBIDDEN semantics when threaded with a workspaceSlug', async () => {

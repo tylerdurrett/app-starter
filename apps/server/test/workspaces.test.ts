@@ -82,7 +82,6 @@ beforeAll(async () => {
   bobCookie = bob.cookie;
   bobId = bob.userId;
 });
-
 afterAll(async () => {
   await closeTestServers();
 });
@@ -522,7 +521,7 @@ describe('POST /api/workspaces/:workspaceSlug/invites', () => {
     expect(res.statusCode).toBe(201);
     const body = parseJsonBody(res);
     expect(body.inviteUrl).toMatch(/\/invite\/workspace\//);
-    // Full mapped WorkspaceInvite shape (routed through the shared mapper).
+    // Full client-safe WorkspaceInvite shape from the service boundary.
     expect(typeof body.invite.id).toBe('string');
     expect(body.invite.email).toBe('newuser@example.com');
     expect(body.invite.role).toBe('manager');

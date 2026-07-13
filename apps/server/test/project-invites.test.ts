@@ -2,7 +2,7 @@
 import '../src/config.js';
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { db, projectInvites } from '@repo/db';
+import { db, projectInvites, users } from '@repo/db';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import {
@@ -35,7 +35,15 @@ async function createInviteViaApi(
     payload: { email, role },
   });
   const body = parseJsonBody<{
-    invite: { id: string };
+    invite: {
+      id: string;
+      email: string;
+      role: string;
+      status: string;
+      expiresAt: string;
+      createdAt: string;
+      invitedByName: string;
+    };
     inviteUrl: string;
   }>(res);
   // Extract the raw token from the inviteUrl
@@ -94,6 +102,16 @@ describe('GET /api/project-invites/:token', () => {
     expect(body.projectSlug).toBe(project.slug);
     expect(body.status).toBe('pending');
     expect(body.expiresAt).toBeDefined();
+    expect(Object.keys(body).sort()).toEqual([
+      'email',
+      'expiresAt',
+      'inviteId',
+      'projectName',
+      'projectSlug',
+      'status',
+      'workspaceName',
+      'workspaceSlug',
+    ]);
   });
 
   it('returns 404 for invalid token', async () => {
@@ -134,11 +152,16 @@ describe('GET /api/project-invites/:token', () => {
     const body = parseJsonBody<Record<string, string>>(res);
     expect(body.status).toBe('revoked');
     expect(body.projectName).toBe('Revoked Project');
+    expect(Object.keys(body)).not.toContain('projectId');
+    expect(Object.keys(body)).not.toContain('tokenHash');
   });
 });
 
 describe('POST /api/project-invites/:token/accept', () => {
-  it('accepts invite for email-matching user', async () => {
+  it('accepts normalized email representations and returns the project result', async () => {
+    const ts = Date.now();
+    const normalizedEmail = `normalized-pinv-${ts}@test.com`;
+    const normalizedUser = await signUp(app, normalizedEmail, 'Normalized Project User');
     const { body: workspace } = await createWorkspaceViaHttp(app, aliceCookie, 'Accept Workspace');
     const { body: project } = await createProjectViaHttp(
       app,
@@ -146,18 +169,23 @@ describe('POST /api/project-invites/:token/accept', () => {
       workspace.slug,
       'Accept Project',
     );
-    const { token } = await createInviteViaApi(
+    const { invite, token } = await createInviteViaApi(
       aliceCookie,
       workspace.slug,
       project.slug,
-      bobEmail,
+      `  ${normalizedEmail.toUpperCase()}  `,
       'manager',
     );
+    expect(invite.email).toBe(normalizedEmail);
+    await db
+      .update(users)
+      .set({ email: `  ${normalizedEmail.toUpperCase()}  ` })
+      .where(eq(users.id, normalizedUser.userId));
 
     const res = await app.inject({
       method: 'POST',
       url: `/api/project-invites/${token}/accept`,
-      headers: { cookie: bobCookie },
+      headers: { cookie: normalizedUser.cookie },
     });
     expect(res.statusCode).toBe(200);
     const body = parseJsonBody<Record<string, string>>(res);
@@ -168,11 +196,22 @@ describe('POST /api/project-invites/:token/accept', () => {
     const check = await app.inject({
       method: 'GET',
       url: `/api/workspaces/${workspace.slug}/projects/${project.slug}`,
-      headers: { cookie: bobCookie },
+      headers: { cookie: normalizedUser.cookie },
     });
     expect(check.statusCode).toBe(200);
     const checkBody = parseJsonBody<Record<string, string>>(check);
     expect(checkBody.role).toBe('manager');
+
+    const metadata = await app.inject({
+      method: 'GET',
+      url: `/api/project-invites/${token}`,
+    });
+    expect(parseJsonBody<Record<string, string>>(metadata).status).toBe('accepted');
+
+    await db
+      .update(users)
+      .set({ email: normalizedEmail })
+      .where(eq(users.id, normalizedUser.userId));
   });
 
   it('returns 403 for email mismatch', async () => {
@@ -285,6 +324,16 @@ describe('POST /api/project-invites/:token/accept', () => {
       .set({ expiresAt: new Date(Date.now() - 1000) })
       .where(eq(projectInvites.id, invite.id));
 
+    const metadata = await app.inject({
+      method: 'GET',
+      url: `/api/project-invites/${token}`,
+    });
+    expect(metadata.statusCode).toBe(200);
+    const metadataBody = parseJsonBody<Record<string, string>>(metadata);
+    expect(metadataBody.status).toBe('pending');
+    expect(new Date(metadataBody.expiresAt).getTime()).toBeLessThan(Date.now());
+    expect(Object.keys(metadataBody)).not.toContain('projectId');
+
     const acceptRes = await app.inject({
       method: 'POST',
       url: `/api/project-invites/${token}/accept`,
@@ -293,5 +342,99 @@ describe('POST /api/project-invites/:token/accept', () => {
     expect(acceptRes.statusCode).toBe(409);
     const body = parseJsonBody<{ error: string }>(acceptRes);
     expect(body.error).toMatch(/expired/);
+  });
+});
+
+describe('POST /api/workspaces/:workspaceSlug/projects/:projectSlug/invites/:inviteId/revoke', () => {
+  it('returns 404 for a missing invite', async () => {
+    const { body: workspace } = await createWorkspaceViaHttp(
+      app,
+      aliceCookie,
+      'Revoke Missing Workspace',
+    );
+    const { body: project } = await createProjectViaHttp(
+      app,
+      aliceCookie,
+      workspace.slug,
+      'Revoke Missing Project',
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/invites/missing-invite/revoke`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('returns an empty 204 then 409 when revoking the same invite again', async () => {
+    const { body: workspace } = await createWorkspaceViaHttp(
+      app,
+      aliceCookie,
+      'Revoke Twice Workspace',
+    );
+    const { body: project } = await createProjectViaHttp(
+      app,
+      aliceCookie,
+      workspace.slug,
+      'Revoke Twice Project',
+    );
+    const { invite } = await createInviteViaApi(
+      aliceCookie,
+      workspace.slug,
+      project.slug,
+      'revoke-twice-http-p@test.com',
+    );
+
+    const first = await app.inject({
+      method: 'POST',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/invites/${invite.id}/revoke`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(first.statusCode).toBe(204);
+    expect(first.body).toBe('');
+
+    const second = await app.inject({
+      method: 'POST',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/invites/${invite.id}/revoke`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(second.statusCode).toBe(409);
+  });
+
+  it('returns 409 for an accepted invite and leaves it accepted', async () => {
+    const ts = Date.now();
+    const email = `accept-revoke-http-p-${ts}@test.com`;
+    const actor = await signUp(app, email, 'Accepted Project User');
+    const { body: workspace } = await createWorkspaceViaHttp(
+      app,
+      aliceCookie,
+      'Accepted Revoke Workspace',
+    );
+    const { body: project } = await createProjectViaHttp(
+      app,
+      aliceCookie,
+      workspace.slug,
+      'Accepted Revoke Project',
+    );
+    const { invite, token } = await createInviteViaApi(
+      aliceCookie,
+      workspace.slug,
+      project.slug,
+      email,
+    );
+    await app.inject({
+      method: 'POST',
+      url: `/api/project-invites/${token}/accept`,
+      headers: { cookie: actor.cookie },
+    });
+
+    const revoke = await app.inject({
+      method: 'POST',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/invites/${invite.id}/revoke`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(revoke.statusCode).toBe(409);
+    const metadata = await app.inject({ method: 'GET', url: `/api/project-invites/${token}` });
+    expect(parseJsonBody<Record<string, string>>(metadata).status).toBe('accepted');
   });
 });
