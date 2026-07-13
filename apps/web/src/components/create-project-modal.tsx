@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Button,
@@ -28,6 +28,7 @@ export function CreateProjectModal({
 }: CreateProjectModalProps) {
   const queryClient = useQueryClient();
   const [name, setName] = useState('');
+  const createInFlight = useRef(false);
   const projectsQueryOptions = workspaceProjectsQueryOptions(workspaceSlug);
   const createMutation = useMutation({
     mutationFn: (projectName: string) => createProject(workspaceSlug, projectName),
@@ -40,6 +41,9 @@ export function CreateProjectModal({
       setName('');
       createMutation.reset();
       onOpenChange(false);
+    },
+    onSettled: () => {
+      createInFlight.current = false;
     },
   });
 
@@ -56,8 +60,9 @@ export function CreateProjectModal({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedName = name.trim();
-    if (!trimmedName || createMutation.isPending) return;
+    if (!trimmedName || createInFlight.current) return;
 
+    createInFlight.current = true;
     createMutation.reset();
     createMutation.mutate(trimmedName);
   };

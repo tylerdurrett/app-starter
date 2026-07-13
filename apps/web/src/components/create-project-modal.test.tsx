@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState, type ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -46,6 +46,16 @@ function createClient() {
       mutations: { retry: false },
     },
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function ProjectObserver({ workspaceSlug, label }: { workspaceSlug: string; label: string }) {
@@ -172,6 +182,47 @@ describe('CreateProjectModal', () => {
     expect(mocks.listProjectsForWorkspace).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId('projects')).toHaveTextContent('New project');
     expect(client.getQueryData(queryKeys.project('acme', 'new-project'))).toBeUndefined();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('blocks rapid duplicate submits while the POST is unresolved', async () => {
+    const user = userEvent.setup();
+    const onCreated = vi.fn();
+    const request = deferred<Project>();
+    mocks.createProject.mockReturnValue(request.promise);
+    mocks.listProjectsForWorkspace
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([projectWithRole(createdProject)]);
+
+    const client = createClient();
+    const invalidateQueries = vi.spyOn(client, 'invalidateQueries');
+    render(
+      <Providers client={client}>
+        <ProjectObserver workspaceSlug="acme" label="projects" />
+        <ModalHost onCreated={onCreated} />
+      </Providers>,
+    );
+
+    await waitFor(() => expect(mocks.listProjectsForWorkspace).toHaveBeenCalledOnce());
+    await user.type(screen.getByLabelText('Name'), 'New project');
+    const form = screen.getByLabelText('Name').closest('form')!;
+
+    act(() => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    await waitFor(() => expect(mocks.createProject).toHaveBeenCalledOnce());
+    expect(invalidateQueries).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+
+    await act(async () => request.resolve(createdProject));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    expect(invalidateQueries).toHaveBeenCalledOnce();
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: queryKeys.projects('acme'),
+      exact: true,
+    });
+    expect(mocks.listProjectsForWorkspace).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });
