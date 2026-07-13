@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { Button, Input } from '@repo/ui';
 import { Plus, Settings, User, LogOut, Check } from 'lucide-react';
@@ -10,6 +11,7 @@ import {
 import { canWorkspace } from '../lib/permissions';
 import { signOut } from '../lib/auth-client';
 import { useActiveContext } from '../lib/active-workspace';
+import { completeSignOutTransition } from '../lib/auth-transitions';
 import {
   Selector,
   SelectorDivider,
@@ -20,6 +22,7 @@ import {
 
 export function WorkspaceSwitcher() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   // Shared derivation: URL first, then localStorage fallback so the switcher
   // keeps its active workspace on workspace-less routes like /account.
@@ -76,8 +79,9 @@ export function WorkspaceSwitcher() {
   }, [fetchWorkspaces]);
 
   const handleLogout = async () => {
-    await signOut();
-    window.location.href = '/login';
+    await completeSignOutTransition(queryClient, signOut, () => {
+      window.location.href = '/login';
+    });
   };
 
   return (

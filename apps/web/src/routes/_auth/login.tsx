@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
 import { signIn } from '../../lib/auth-client';
 import { resolveProject } from '../../lib/project-resolver';
-import { clearAuthenticatedClientState } from '../../lib/authenticated-client-state';
+import { completeLoginTransition } from '../../lib/auth-transitions';
 
 const authRoute = getRouteApi('/_auth');
 
@@ -38,21 +38,13 @@ function LoginPage() {
         return;
       }
 
-      // If the server returned an OAuth redirect (e.g. to the consent page),
-      // BetterAuth's redirectPlugin already set window.location.href.
-      // Skip manual navigation to avoid racing with it.
-      if (response.data?.redirect && response.data?.url) {
-        return;
-      }
-
-      clearAuthenticatedClientState(queryClient);
-
-      if (redirectTo) {
-        await navigate({ to: redirectTo });
-      } else {
-        const target = await resolveProject(queryClient);
-        await navigate(target);
-      }
+      await completeLoginTransition({
+        queryClient,
+        externalRedirect: Boolean(response.data?.redirect && response.data?.url),
+        redirectTo,
+        navigate: (target) => navigate(target),
+        resolveDestination: resolveProject,
+      });
     } catch {
       setError('An unexpected error occurred. Please try again.');
       setIsLoading(false);
