@@ -12,15 +12,33 @@ export class ApiError extends Error {
     this.name = 'ApiError';
   }
 
-  /** Parse the JSON error body and return the `error` field, or null if unparseable. */
+  /** Return the server's structured error message, or null if none is present. */
   get parsedMessage(): string | null {
     try {
-      const parsed = JSON.parse(this.body);
-      return parsed.error ?? null;
+      const parsed: unknown = JSON.parse(this.body);
+      if (!parsed || typeof parsed !== 'object' || !('error' in parsed)) return null;
+
+      const structuredError = parsed.error;
+      if (typeof structuredError === 'string') return structuredError.trim() || null;
+      if (
+        structuredError &&
+        typeof structuredError === 'object' &&
+        'message' in structuredError &&
+        typeof structuredError.message === 'string'
+      ) {
+        return structuredError.message.trim() || null;
+      }
+
+      return null;
     } catch {
       return null;
     }
   }
+}
+
+/** Present a structured API error when available, with stable fallback copy. */
+export function apiErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof ApiError ? (error.parsedMessage ?? fallback) : fallback;
 }
 
 export async function apiFetch<T>(
