@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Button,
   Dialog,
@@ -10,6 +11,7 @@ import {
   Label,
 } from '@repo/ui';
 import { createProject, type Project } from '../lib/projects';
+import { workspaceProjectsQueryOptions } from '../lib/workspace-queries';
 
 interface CreateProjectModalProps {
   workspaceSlug: string;
@@ -24,14 +26,26 @@ export function CreateProjectModal({
   onOpenChange,
   onCreated,
 }: CreateProjectModalProps) {
+  const queryClient = useQueryClient();
   const [name, setName] = useState('');
-  const [isCreating, setIsCreating] = useState(false);
-  const [error, setError] = useState('');
+  const projectsQueryOptions = workspaceProjectsQueryOptions(workspaceSlug);
+  const createMutation = useMutation({
+    mutationFn: (projectName: string) => createProject(workspaceSlug, projectName),
+    onSuccess: async (project) => {
+      await queryClient.invalidateQueries({
+        queryKey: projectsQueryOptions.queryKey,
+        exact: true,
+      });
+      onCreated(project);
+      setName('');
+      createMutation.reset();
+      onOpenChange(false);
+    },
+  });
 
   const reset = () => {
     setName('');
-    setError('');
-    setIsCreating(false);
+    createMutation.reset();
   };
 
   const handleOpenChange = (next: boolean) => {
@@ -39,22 +53,13 @@ export function CreateProjectModal({
     onOpenChange(next);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedName = name.trim();
-    if (!trimmedName) return;
+    if (!trimmedName || createMutation.isPending) return;
 
-    setError('');
-    setIsCreating(true);
-    try {
-      const project = await createProject(workspaceSlug, trimmedName);
-      onCreated(project);
-      reset();
-      onOpenChange(false);
-    } catch {
-      setError('Failed to create project');
-      setIsCreating(false);
-    }
+    createMutation.reset();
+    createMutation.mutate(trimmedName);
   };
 
   return (
@@ -72,25 +77,32 @@ export function CreateProjectModal({
                 placeholder="e.g. Marketing site"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                disabled={isCreating}
+                disabled={createMutation.isPending}
                 required
                 autoFocus
               />
             </div>
 
-            {error && <div className="text-sm text-destructive">{error}</div>}
+            {createMutation.isError && (
+              <div className="text-sm text-destructive" role="alert">
+                Failed to create project
+              </div>
+            )}
 
             <div className="flex justify-end gap-2 pt-2">
               <Button
                 type="button"
                 variant="ghost"
                 onClick={() => handleOpenChange(false)}
-                disabled={isCreating}
+                disabled={createMutation.isPending}
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={isCreating || !name.trim()}>
-                {isCreating ? 'Creating...' : 'Create'}
+              <Button
+                type="submit"
+                disabled={createMutation.isPending || !name.trim()}
+              >
+                {createMutation.isPending ? 'Creating...' : 'Create'}
               </Button>
             </div>
           </form>

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { Plus, Settings } from 'lucide-react';
 import { canWorkspace, type WorkspaceRole } from '../lib/permissions';
 import { workspaceProjectsQueryOptions } from '../lib/workspace-queries';
@@ -25,7 +25,6 @@ export function ProjectSwitcher({
   activeProjectSlug,
 }: ProjectSwitcherProps) {
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const projectsQueryOptions = workspaceProjectsQueryOptions(workspaceSlug);
   const projectsQuery = useQuery(projectsQueryOptions);
@@ -131,7 +130,6 @@ export function ProjectSwitcher({
         open={showCreateModal}
         onOpenChange={setShowCreateModal}
         onCreated={(project) => {
-          void queryClient.invalidateQueries({ queryKey: projectsQueryOptions.queryKey });
           navigate({
             to: '/w/$workspaceSlug/p/$projectSlug',
             params: { workspaceSlug, projectSlug: project.slug },

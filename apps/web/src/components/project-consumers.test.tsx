@@ -51,8 +51,47 @@ vi.mock('@tanstack/react-router', () => ({
 }));
 
 vi.mock('./create-project-modal', () => ({
-  CreateProjectModal: ({ open }: { open: boolean }) =>
-    open ? <div role="dialog">Create project modal</div> : null,
+  CreateProjectModal: ({
+    open,
+    onOpenChange,
+    onCreated,
+  }: {
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+    onCreated: (project: {
+      id: string;
+      workspaceId: string;
+      workspaceSlug: string;
+      workspaceName: string;
+      slug: string;
+      name: string;
+      createdAt: string;
+      updatedAt: string;
+    }) => void;
+  }) =>
+    open ? (
+      <div role="dialog">
+        Create project modal
+        <button
+          type="button"
+          onClick={() => {
+            onCreated({
+              id: 'project-new',
+              workspaceId: 'workspace-acme',
+              workspaceSlug: 'acme',
+              workspaceName: 'Acme',
+              slug: 'new-project',
+              name: 'New project',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            });
+            onOpenChange(false);
+          }}
+        >
+          Complete project creation
+        </button>
+      </div>
+    ) : null,
 }));
 
 import { queryKeys } from '../lib/query-keys';
@@ -172,6 +211,32 @@ describe('workspace project query consumers', () => {
 
     await user.click(screen.getByRole('button', { name: 'Switch project' }));
     expect(await screen.findByText('Failed to load projects')).toBeInTheDocument();
+  });
+
+  it('keeps the switcher creation callback limited to navigation and modal UI', async () => {
+    const user = userEvent.setup();
+    mocks.listProjectsForWorkspace.mockResolvedValue([]);
+
+    render(
+      <Providers client={createClient()}>
+        <ProjectSwitcher
+          workspaceSlug="acme"
+          workspaceRole="owner"
+          activeProjectSlug={null}
+        />
+      </Providers>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Switch project' }));
+    await user.click(await screen.findByRole('button', { name: 'New project' }));
+    await user.click(screen.getByRole('button', { name: 'Complete project creation' }));
+
+    expect(mocks.navigate).toHaveBeenCalledOnce();
+    expect(mocks.navigate).toHaveBeenCalledWith({
+      to: '/w/$workspaceSlug/p/$projectSlug',
+      params: { workspaceSlug: 'acme', projectSlug: 'new-project' },
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   it('does not restart an in-flight mount refetch when opened with stale cached data', async () => {

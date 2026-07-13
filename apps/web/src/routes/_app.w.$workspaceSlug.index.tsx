@@ -1,6 +1,6 @@
 import { createFileRoute, Link, getRouteApi, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle } from '@repo/ui';
 import { listWorkspaceMembers } from '../lib/workspaces';
 import { canWorkspace } from '../lib/permissions';
@@ -19,7 +19,6 @@ export function WorkspaceHomePage() {
   const { workspace } = workspaceRoute.useLoaderData();
   const { role } = workspace;
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
 
   const [showCreateModal, setShowCreateModal] = useState(false);
 
@@ -154,9 +153,6 @@ export function WorkspaceHomePage() {
         open={showCreateModal}
         onOpenChange={setShowCreateModal}
         onCreated={(project) => {
-          queryClient.invalidateQueries({
-            queryKey: projectsQueryOptions.queryKey,
-          });
           navigate({
             to: '/w/$workspaceSlug/p/$projectSlug',
             params: { workspaceSlug: workspace.slug, projectSlug: project.slug },
