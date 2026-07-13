@@ -54,6 +54,39 @@ describe('authenticated flow transitions', () => {
     expect(resolveDestination).not.toHaveBeenCalled();
   });
 
+  it('clears user A before resolving and navigating to user B after a normal login', async () => {
+    const queryClient = setupPrivateState();
+    const userBDestination = {
+      to: '/w/$workspaceSlug/p/$projectSlug',
+      params: { workspaceSlug: 'b', projectSlug: 'home' },
+    };
+    const fetchUserBDestination = vi.fn(async () => {
+      expect(queryClient.getQueryData(['private', 'user-a'])).toBeUndefined();
+      expect(readActiveContext()).toBeNull();
+      return userBDestination;
+    });
+    const resolveDestination = vi.fn((client: QueryClient) =>
+      client.fetchQuery({
+        queryKey: ['destination', 'user-b'],
+        queryFn: fetchUserBDestination,
+      }),
+    );
+    const navigate = vi.fn();
+
+    await completeLoginTransition({
+      queryClient,
+      externalRedirect: false,
+      navigate,
+      resolveDestination,
+    });
+
+    expect(fetchUserBDestination).toHaveBeenCalledOnce();
+    expect(resolveDestination).toHaveBeenCalledWith(queryClient);
+    expect(queryClient.getQueryData(['destination', 'user-b'])).toEqual(userBDestination);
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledWith(userBDestination);
+  });
+
   it('clears a public invite sign-out before its reload continuation', async () => {
     const queryClient = setupPrivateState();
     const order: string[] = [];
