@@ -18,6 +18,7 @@ const queryClient: QueryClient = new QueryClient({
       // Better Auth owns focus/session refresh. Refetching private queries in
       // parallel can race a cross-tab identity change before it is reconciled.
       refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
       enabled: (): boolean => authenticatedClientQueriesEnabled(queryClient),
     },
   },

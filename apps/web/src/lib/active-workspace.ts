@@ -1,18 +1,21 @@
 import { useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouterState } from '@tanstack/react-router';
 import {
   lastActiveProjectValidationQueryOptions,
   projectQueryOptions,
 } from './project-queries';
 import type { Project } from './projects';
+import { authenticatedQueryEnabled } from './authenticated-client-state';
+import { ACTIVE_CONTEXT_KEY, clearActiveContext } from './active-context-storage';
+
+export { clearActiveContext } from './active-context-storage';
 
 // Single coherent active-context hint. The workspace and project slugs are
 // stored together as one unit so a workspace remembered in one session can
 // never be paired with a project remembered in another (the cross-workspace
 // drift bug). Replaces the old two-key scheme (lastActiveWorkspaceSlug +
 // lastActiveProjectSlug), which wrote each half independently.
-const ACTIVE_CONTEXT_KEY = 'activeContext';
 const WORKSPACE_PATH_RE = /^\/w\/([^/]+)/;
 const PROJECT_PATH_RE = /^\/w\/[^/]+\/p\/([^/]+)/;
 
@@ -46,14 +49,6 @@ function safeWrite(key: string, value: string): void {
     window.localStorage.setItem(key, value);
   } catch {
     // storage disabled (private mode, quota, etc.) — fallback just won't persist
-  }
-}
-
-function safeRemove(key: string): void {
-  try {
-    window.localStorage.removeItem(key);
-  } catch {
-    // storage disabled (private mode, quota, etc.) — nothing to clear
   }
 }
 
@@ -95,11 +90,6 @@ export function readActiveContext(): StoredActiveContext | null {
 /** Safe JSON write of the single unit. Swallows storage errors. */
 export function writeActiveContext(ctx: StoredActiveContext): void {
   safeWrite(ACTIVE_CONTEXT_KEY, JSON.stringify(ctx));
-}
-
-/** Safe removal of the single unit. Swallows storage errors. */
-export function clearActiveContext(): void {
-  safeRemove(ACTIVE_CONTEXT_KEY);
 }
 
 /**
@@ -199,6 +189,7 @@ export type ActiveContext = ResolvedActiveContext & {
  * project)` pair — so the cache only ever holds a coherent pair.
  */
 export function useActiveContext(): ActiveContext {
+  const queryClient = useQueryClient();
   const router = useRouterState();
   const currentPath = router.location.pathname;
 
@@ -207,7 +198,7 @@ export function useActiveContext(): ActiveContext {
   const hasUrlPair = urlWorkspaceSlug != null && urlProjectSlug != null;
   const projectQuery = useQuery({
     ...projectQueryOptions(urlWorkspaceSlug ?? '', urlProjectSlug ?? ''),
-    enabled: hasUrlPair,
+    enabled: authenticatedQueryEnabled(queryClient, hasUrlPair),
   });
   const urlProject = hasUrlPair ? projectQuery.data : undefined;
   const urlProjectWorkspaceName = urlProject?.workspaceName ?? null;
@@ -232,7 +223,7 @@ export function useActiveContext(): ActiveContext {
     ...lastActiveProjectValidationQueryOptions(
       cached ?? { workspaceSlug: '', projectSlug: '', projectId: null },
     ),
-    enabled: cached != null,
+    enabled: authenticatedQueryEnabled(queryClient, cached != null),
   });
 
   // A cached verdict is authoritative only after the request for this exact

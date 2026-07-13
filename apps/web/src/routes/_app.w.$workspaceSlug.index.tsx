@@ -1,6 +1,6 @@
 import { createFileRoute, Link, getRouteApi, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle } from '@repo/ui';
 import { listWorkspaceMembers } from '../lib/workspaces';
 import { canWorkspace } from '../lib/permissions';
@@ -8,6 +8,7 @@ import { queryKeys } from '../lib/query-keys';
 import { workspaceProjectsQueryOptions } from '../lib/workspace-queries';
 import { CreateProjectModal } from '../components/create-project-modal';
 import { Plus } from 'lucide-react';
+import { authenticatedQueryEnabled } from '../lib/authenticated-client-state';
 
 const workspaceRoute = getRouteApi('/_app/w/$workspaceSlug');
 
@@ -16,6 +17,7 @@ export const Route = createFileRoute('/_app/w/$workspaceSlug/')({
 });
 
 export function WorkspaceHomePage() {
+  const queryClient = useQueryClient();
   const { workspace } = workspaceRoute.useLoaderData();
   const { role } = workspace;
   const navigate = useNavigate();
@@ -32,7 +34,7 @@ export function WorkspaceHomePage() {
   const membersQuery = useQuery({
     queryKey: queryKeys.workspaceMembers(workspace.slug),
     queryFn: () => listWorkspaceMembers(workspace.slug),
-    enabled: canListMembers,
+    enabled: authenticatedQueryEnabled(queryClient, canListMembers),
   });
   const members = membersQuery.data ?? [];
 

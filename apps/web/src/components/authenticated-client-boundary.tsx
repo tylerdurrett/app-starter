@@ -18,7 +18,7 @@ export function AuthenticatedClientBoundary({ children }: { children: ReactNode 
   );
 
   useEffect(() => {
-    if (session.isPending || validatedOwner === userId) return;
+    if (session.isPending || session.isRefetching || validatedOwner === userId) return;
 
     let active = true;
     void establishAuthenticatedClientOwner(queryClient, userId).then(async () => {
@@ -34,9 +34,9 @@ export function AuthenticatedClientBoundary({ children }: { children: ReactNode 
     return () => {
       active = false;
     };
-  }, [queryClient, router, session.isPending, userId, validatedOwner]);
+  }, [queryClient, router, session.isPending, session.isRefetching, userId, validatedOwner]);
 
-  if (session.isPending && validatedOwner === undefined) return null;
-  if (!session.isPending && (userId === null || validatedOwner !== userId)) return null;
+  if (session.isPending || session.isRefetching) return null;
+  if (userId === null || validatedOwner !== userId) return null;
   return children;
 }

@@ -1,4 +1,9 @@
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -6,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   session: {
     data: { user: { id: 'user-a' } } as { user: { id: string } } | null,
     isPending: false,
+    isRefetching: false,
   },
   invalidate: vi.fn(async () => {}),
   navigate: vi.fn(async () => {}),
@@ -21,11 +27,19 @@ vi.mock('@tanstack/react-router', () => ({
 }));
 
 import { AuthenticatedClientBoundary } from './authenticated-client-boundary';
-import { establishAuthenticatedClientOwner } from '../lib/authenticated-client-state';
+import {
+  authenticatedQueryEnabled,
+  establishAuthenticatedClientOwner,
+} from '../lib/authenticated-client-state';
 import { readActiveContext, writeActiveContext } from '../lib/active-workspace';
 
 function PrivateConsumer({ userId }: { userId: string }) {
-  useQuery({ queryKey: ['private', userId], queryFn: mocks.privateRead });
+  const queryClient = useQueryClient();
+  useQuery({
+    queryKey: ['private', userId],
+    queryFn: mocks.privateRead,
+    enabled: authenticatedQueryEnabled(queryClient, true),
+  });
   return <div>{userId}</div>;
 }
 
@@ -33,6 +47,7 @@ beforeEach(() => {
   window.localStorage.clear();
   mocks.session.data = { user: { id: 'user-a' } };
   mocks.session.isPending = false;
+  mocks.session.isRefetching = false;
   mocks.invalidate.mockClear();
   mocks.navigate.mockClear();
   mocks.privateRead.mockReset();
@@ -53,6 +68,36 @@ describe('AuthenticatedClientBoundary', () => {
     );
 
     expect(screen.queryByText('private shell')).not.toBeInTheDocument();
+  });
+
+  it('unmounts private queries while the session refetch retains prior user data', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    await establishAuthenticatedClientOwner(queryClient, 'user-a');
+    queryClient.setQueryData(['private', 'user-a'], { secret: true });
+
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AuthenticatedClientBoundary>
+          <PrivateConsumer userId="user-a" />
+        </AuthenticatedClientBoundary>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText('user-a')).toBeInTheDocument();
+
+    mocks.session.isRefetching = true;
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <AuthenticatedClientBoundary>
+          <PrivateConsumer userId="user-a" />
+        </AuthenticatedClientBoundary>
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByText('user-a')).not.toBeInTheDocument();
+    expect(queryClient.getQueryCache().findAll()).toHaveLength(1);
+    expect(mocks.privateRead).not.toHaveBeenCalled();
   });
 
   it('blocks mounted user B reads until a cross-tab session change clears user A', async () => {

@@ -1,5 +1,5 @@
 import { useRouterState, useMatch } from '@tanstack/react-router';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { LayoutDashboard, Plug } from 'lucide-react';
 import { TooltipProvider } from '@repo/ui';
 import { NavTile } from './nav-tile';
@@ -7,8 +7,10 @@ import { WorkspaceSwitcher } from './workspace-switcher';
 import { ProjectSwitcher } from './project-switcher';
 import { useActiveContext } from '../lib/active-workspace';
 import { workspaceQueryOptions, workspacesQueryOptions } from '../lib/workspace-queries';
+import { authenticatedQueryEnabled } from '../lib/authenticated-client-state';
 
 export function NavRail() {
+  const queryClient = useQueryClient();
   const router = useRouterState();
   const currentPath = router.location.pathname;
 
@@ -31,7 +33,7 @@ export function NavRail() {
   const routeWorkspaceSlug = workspaceMatch?.params.workspaceSlug ?? null;
   const workspaceQuery = useQuery({
     ...workspaceQueryOptions(routeWorkspaceSlug ?? ''),
-    enabled: routeWorkspaceSlug != null,
+    enabled: authenticatedQueryEnabled(queryClient, routeWorkspaceSlug != null),
   });
 
   // Workspace-less routes share this exact list Query with WorkspaceSwitcher.
@@ -39,7 +41,7 @@ export function NavRail() {
   // requests from overwriting newer cache state.
   const workspacesQuery = useQuery({
     ...workspacesQueryOptions(),
-    enabled: routeWorkspaceSlug == null,
+    enabled: authenticatedQueryEnabled(queryClient, routeWorkspaceSlug == null),
   });
   const fallbackWorkspaces = workspacesQuery.data ?? [];
   const fallbackWorkspace =

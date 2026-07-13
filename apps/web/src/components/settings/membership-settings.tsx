@@ -1,8 +1,9 @@
 import { useRef, useState } from 'react';
-import { useMutation, useQuery, type QueryKey } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle } from '@repo/ui';
 import { UserMinus } from 'lucide-react';
 import { apiErrorMessage } from '../../lib/api';
+import { authenticatedQueryEnabled } from '../../lib/authenticated-client-state';
 
 export interface MembershipMember {
   userId: string;
@@ -28,10 +29,11 @@ export function MembershipSettings<Member extends MembershipMember>({
   adapter,
   currentUserId,
 }: MembershipSettingsProps<Member>) {
+  const queryClient = useQueryClient();
   const membersQuery = useQuery({
     queryKey: adapter.queryKey,
     queryFn: () => adapter.listMembers(),
-    enabled: adapter.canList,
+    enabled: authenticatedQueryEnabled(queryClient, adapter.canList),
   });
   const [pendingRemovalIds, setPendingRemovalIds] = useState<ReadonlySet<string>>(new Set());
   const [removalErrors, setRemovalErrors] = useState<ReadonlyMap<string, unknown>>(new Map());

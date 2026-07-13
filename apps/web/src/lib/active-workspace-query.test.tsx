@@ -28,6 +28,7 @@ import {
   lastActiveProjectValidationQueryOptions,
   projectQueryOptions,
 } from './project-queries';
+import { establishAuthenticatedClientOwner } from './authenticated-client-state';
 
 const hintA = {
   workspaceSlug: 'workspace-a',
@@ -65,9 +66,12 @@ function deferred<T>() {
 }
 
 function createClient(staleTime = Infinity) {
-  return new QueryClient({
+  const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime } },
   });
+  window.localStorage.setItem('authenticatedClientOwner', 'test-user');
+  void establishAuthenticatedClientOwner(queryClient, 'test-user');
+  return queryClient;
 }
 
 function ContextProbe() {

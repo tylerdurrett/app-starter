@@ -1,5 +1,5 @@
 import type { QueryClient } from '@tanstack/react-query';
-import { clearActiveContext } from './active-workspace';
+import { clearActiveContext } from './active-context-storage';
 
 const AUTHENTICATED_CLIENT_OWNER_KEY = 'authenticatedClientOwner';
 
@@ -113,6 +113,14 @@ export function authenticatedClientQueriesEnabled(queryClient: QueryClient): boo
   return state.ownerKnown && state.owner !== null && !state.transitioning;
 }
 
+/** Compose a query's feature gate with the authenticated-client ownership gate. */
+export function authenticatedQueryEnabled(
+  queryClient: QueryClient,
+  featureEnabled: boolean,
+): boolean {
+  return featureEnabled && authenticatedClientQueriesEnabled(queryClient);
+}
+
 /**
  * Reconcile a session observation with private client state. Concurrent checks
  * converge on the newest-started observation, so stale responses cannot win.
@@ -147,7 +155,21 @@ export function establishAuthenticatedClientOwner(
   queryClient: QueryClient,
   userId: string | null,
 ): Promise<SessionIdentity> {
-  return observeAuthenticatedSession(queryClient, async () =>
-    userId === null ? null : { userId },
-  );
+  const state = getClientState(queryClient);
+  const generation = ++state.generation;
+  const identity = userId === null ? null : { userId };
+
+  const establishment = (async (): Promise<SessionIdentity> => {
+    const established = await replaceAuthenticatedClientOwner(
+      queryClient,
+      state,
+      userId,
+      generation,
+    );
+    if (!established) return state.latestObservation!;
+    return identity;
+  })();
+
+  state.latestObservation = establishment;
+  return establishment;
 }

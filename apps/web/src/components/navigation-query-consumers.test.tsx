@@ -82,6 +82,7 @@ vi.mock('./project-switcher', () => ({
 }));
 
 import { queryKeys } from '../lib/query-keys';
+import { establishAuthenticatedClientOwner } from '../lib/authenticated-client-state';
 import { NavRail } from './nav-rail';
 
 function workspace(
@@ -122,9 +123,12 @@ function deferred<T>() {
 }
 
 function createClient() {
-  return new QueryClient({
+  const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  window.localStorage.setItem('authenticatedClientOwner', 'test-user');
+  void establishAuthenticatedClientOwner(queryClient, 'test-user');
+  return queryClient;
 }
 
 function renderNav(client = createClient()) {

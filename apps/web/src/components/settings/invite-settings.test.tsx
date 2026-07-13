@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../lib/api';
 import { InviteSettings } from './invite-settings';
 import type { InviteSettingsAdapter, PendingInvite } from './invite-settings';
+import { establishAuthenticatedClientOwner } from '../../lib/authenticated-client-state';
 
 vi.hoisted(() => {
   vi.stubEnv('VITE_SERVER_URL', 'http://localhost:3001');
@@ -59,6 +60,8 @@ function renderSettings(settingsAdapter: InviteSettingsAdapter) {
       mutations: { retry: false },
     },
   });
+  window.localStorage.setItem('authenticatedClientOwner', 'test-user');
+  void establishAuthenticatedClientOwner(queryClient, 'test-user');
   const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );

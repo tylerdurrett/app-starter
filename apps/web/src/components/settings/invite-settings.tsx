@@ -1,9 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { QueryKey } from '@tanstack/react-query';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label } from '@repo/ui';
 import { Copy, X } from 'lucide-react';
 import { apiErrorMessage } from '../../lib/api';
+import { authenticatedQueryEnabled } from '../../lib/authenticated-client-state';
 
 export type InviteRole = 'manager' | 'member';
 
@@ -27,11 +28,12 @@ export interface InviteSettingsAdapter {
 }
 
 export function InviteSettings({ adapter }: { adapter: InviteSettingsAdapter }) {
+  const queryClient = useQueryClient();
   const emailInputId = useId();
   const invitesQuery = useQuery({
     queryKey: adapter.queryKey,
     queryFn: adapter.listInvites,
-    enabled: adapter.canList,
+    enabled: authenticatedQueryEnabled(queryClient, adapter.canList),
   });
   const invites = invitesQuery.data ?? [];
   const [showForm, setShowForm] = useState(false);
