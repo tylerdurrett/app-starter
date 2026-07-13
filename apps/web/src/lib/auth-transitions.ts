@@ -43,6 +43,6 @@ export async function completeSignOutTransition(
 ): Promise<void> {
   const result = await signOut();
   if (result?.error) throw result.error;
-  clearAuthenticatedClientState(queryClient);
+  clearAuthenticatedClientState(queryClient, null);
   await continueAfterSignOut();
 }

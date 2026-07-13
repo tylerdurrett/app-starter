@@ -1,7 +1,7 @@
 import { createFileRoute, Outlet, redirect } from '@tanstack/react-router';
 import { authClient } from '../lib/auth-client';
 import { resolveProject } from '../lib/project-resolver';
-import { clearAuthenticatedClientState } from '../lib/authenticated-client-state';
+import { establishAuthenticatedClientOwner } from '../lib/authenticated-client-state';
 
 interface AuthSearch {
   redirectTo?: string;
@@ -16,6 +16,7 @@ export const Route = createFileRoute('/_auth')({
   },
   beforeLoad: async ({ search, context }) => {
     const { data } = await authClient.getSession();
+    establishAuthenticatedClientOwner(context.queryClient, data?.user.id ?? null);
     if (data) {
       if (search.redirectTo) {
         throw redirect({ to: search.redirectTo });
@@ -23,7 +24,6 @@ export const Route = createFileRoute('/_auth')({
       const target = await resolveProject(context.queryClient);
       throw redirect({ to: target.to, params: target.params });
     }
-    clearAuthenticatedClientState(context.queryClient);
   },
   component: AuthLayout,
 });

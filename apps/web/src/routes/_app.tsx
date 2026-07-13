@@ -1,13 +1,13 @@
 import { createFileRoute, Outlet, redirect } from '@tanstack/react-router';
 import { authClient } from '../lib/auth-client';
-import { clearAuthenticatedClientState } from '../lib/authenticated-client-state';
+import { establishAuthenticatedClientOwner } from '../lib/authenticated-client-state';
 import { NavRail } from '../components/nav-rail';
 
 export const Route = createFileRoute('/_app')({
   beforeLoad: async ({ context }) => {
     const { data } = await authClient.getSession();
+    establishAuthenticatedClientOwner(context.queryClient, data?.user.id ?? null);
     if (!data) {
-      clearAuthenticatedClientState(context.queryClient);
       throw redirect({ to: '/login' });
     }
   },
