@@ -48,4 +48,5 @@ disable the checkout-owned database.
 - [docs/adr/](docs/adr/) — architecture decision records
 - [MCP surface](docs/mcp.md) — the connector's tools and scopes
 - [HTTPS dev over Tailscale](docs/dev-https-tailscale.md) — production-like local OAuth
+- [Proxy trust](docs/proxy-trust.md) — safely recover client IPs behind a known proxy
 - [Agent workflow](docs/agents/README.md) — how specs flow from idea to ship

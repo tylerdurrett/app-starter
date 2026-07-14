@@ -27,8 +27,9 @@ from the incoming request:
   values must agree *by construction*, not by patching outputs.
 - The MCP resource identifier (JWT `aud`, protected-resource `resource`) is
   `MCP_CANONICAL_URL`, explicit in prod.
-- `trustProxy: true` is scoped to client-IP recovery for rate limiting and
-  logs only — never identity.
+- Proxy trust defaults off and can be enabled only for an explicit hop count,
+  address range, or supported local-network alias. It is scoped to client-IP
+  recovery for rate limiting and logs only — never server identity.
 
 ## Alternatives rejected (both actually tried in the parent codebase)
 

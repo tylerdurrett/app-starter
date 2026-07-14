@@ -1,5 +1,5 @@
 // config must be imported first — it loads .env before @repo/db reads DATABASE_URL
-import { config } from './config.js';
+import { config, type TrustProxyPolicy } from './config.js';
 import { ping } from '@repo/db';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
@@ -28,6 +28,7 @@ export type { DbProbe };
 export interface BuildServerOpts {
   dbProbe?: DbProbe;
   loggerStream?: { write(msg: string): void };
+  trustProxy?: TrustProxyPolicy;
 }
 
 export const BODY_LIMIT_BYTES = 1024 * 1024;
@@ -137,13 +138,14 @@ export function buildServer(opts?: BuildServerOpts) {
     logger: opts?.loggerStream
       ? { ...SERVER_LOGGER_OPTIONS, stream: opts.loggerStream }
       : SERVER_LOGGER_OPTIONS,
-    trustProxy: true,
+    trustProxy: opts?.trustProxy ?? config.trustProxy,
     bodyLimit: BODY_LIMIT_BYTES,
   });
 
   app.register(rateLimit, {
     max: GLOBAL_RATE_LIMIT_MAX,
     timeWindow: RATE_LIMIT_TIME_WINDOW,
+    keyGenerator: (request) => request.ip,
     // V1 uses the plugin's in-memory store for one Render API process.
     // Use Redis before scaling to multiple API replicas so limits are shared.
   });
