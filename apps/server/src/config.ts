@@ -1,5 +1,6 @@
 import { config as loadEnv } from 'dotenv';
 import { readFileSync } from 'node:fs';
+import { isIP } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -46,6 +47,50 @@ function parseStrictBoolean(name: string, raw: string | undefined, fallback: boo
   if (raw === 'true') return true;
   if (raw === 'false') return false;
   throw new Error(`${name} must be either "true" or "false"`);
+}
+
+const TRUST_PROXY_ALIASES = new Set(['loopback', 'linklocal', 'uniquelocal']);
+const TRUST_PROXY_ERROR =
+  'TRUST_PROXY must be "false", a canonical positive integer, or a comma-separated list of IP addresses, CIDR ranges, and supported aliases (loopback, linklocal, uniquelocal)';
+
+function isCanonicalPositiveInteger(value: string): boolean {
+  return /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value));
+}
+
+function isValidProxyAddress(value: string): boolean {
+  const slashIndex = value.indexOf('/');
+  if (slashIndex === -1) return isIP(value) !== 0;
+  if (slashIndex !== value.lastIndexOf('/')) return false;
+
+  const address = value.slice(0, slashIndex);
+  const prefix = value.slice(slashIndex + 1);
+  const family = isIP(address);
+  if (family === 0 || !isCanonicalPositiveInteger(prefix)) return false;
+
+  return Number(prefix) <= (family === 4 ? 32 : 128);
+}
+
+export type TrustProxyPolicy = false | number | string[];
+
+function parseTrustProxy(raw: string | undefined): TrustProxyPolicy {
+  const value = raw?.trim();
+  if (!value || value === 'false') return false;
+
+  if (/^[1-9]\d*$/.test(value)) {
+    const hops = Number(value);
+    if (Number.isSafeInteger(hops)) return hops;
+    throw new Error(TRUST_PROXY_ERROR);
+  }
+
+  const entries = value.split(',').map((entry) => entry.trim());
+  if (
+    entries.some((entry) => !entry) ||
+    entries.some((entry) => !TRUST_PROXY_ALIASES.has(entry) && !isValidProxyAddress(entry))
+  ) {
+    throw new Error(TRUST_PROXY_ERROR);
+  }
+
+  return entries;
 }
 
 function isPrivateHost(hostname: string): boolean {
@@ -155,6 +200,7 @@ const authRequireEmailVerification = parseStrictBoolean(
   process.env.AUTH_REQUIRE_EMAIL_VERIFICATION,
   isProduction,
 );
+const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
 
 if (isProduction && authRequireEmailVerification) {
   if (!process.env.RESEND_API_KEY) {
@@ -173,4 +219,5 @@ export const config = {
   apiOrigin,
   mcpCanonicalUrl,
   authRequireEmailVerification,
+  trustProxy,
 } as const;

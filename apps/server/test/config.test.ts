@@ -10,6 +10,7 @@ const TEST_ENV_KEYS = [
   'AUTH_REQUIRE_EMAIL_VERIFICATION',
   'RESEND_API_KEY',
   'EMAIL_FROM',
+  'TRUST_PROXY',
 ] as const;
 
 const VALID_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
@@ -105,7 +106,83 @@ describe('server config', () => {
       webOrigin: 'https://app.example.com',
       mcpCanonicalUrl: 'https://api.example.com/mcp',
       authRequireEmailVerification: false,
+      trustProxy: false,
     });
+  });
+
+  it.each([
+    ['unset', undefined],
+    ['empty', ''],
+    ['whitespace', '   '],
+    ['explicit false', 'false'],
+    ['trimmed false', ' false '],
+  ])('disables proxy trust when TRUST_PROXY is %s', async (_name, value) => {
+    setEnv({});
+    if (value === undefined) delete process.env.TRUST_PROXY;
+    else process.env.TRUST_PROXY = value;
+
+    const { config } = await importConfig();
+
+    expect(config.trustProxy).toBe(false);
+  });
+
+  it.each([
+    ['one hop', '1', 1],
+    ['trimmed hop count', ' 2 ', 2],
+    ['largest safe hop count', String(Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER],
+  ])('accepts TRUST_PROXY as a canonical positive integer: %s', async (_name, value, expected) => {
+    setEnv({ TRUST_PROXY: value });
+
+    const { config } = await importConfig();
+
+    expect(config.trustProxy).toBe(expected);
+  });
+
+  it.each([
+    ['IPv4', '127.0.0.1'],
+    ['IPv6', '::1'],
+    ['IPv4 CIDR', '10.0.0.0/8'],
+    ['IPv6 CIDR', 'fd00::/8'],
+    ['supported aliases', 'loopback,linklocal,uniquelocal'],
+    ['trimmed mixed list', ' loopback, 10.0.0.0/8, fd00::/8 '],
+  ])('accepts a validated TRUST_PROXY address list: %s', async (_name, value) => {
+    setEnv({ TRUST_PROXY: value });
+
+    const { config } = await importConfig();
+
+    expect(config.trustProxy).toEqual(
+      value
+        .trim()
+        .split(',')
+        .map((entry) => entry.trim()),
+    );
+  });
+
+  it.each([
+    ['boolean true', 'true'],
+    ['zero hop count', '0'],
+    ['negative hop count', '-1'],
+    ['leading-zero hop count', '01'],
+    ['unsafe hop count', '9007199254740992'],
+    ['decimal hop count', '1.5'],
+    ['empty first member', ',loopback'],
+    ['empty middle member', 'loopback,,10.0.0.0/8'],
+    ['empty last member', 'loopback,'],
+    ['false in a list', 'false,loopback'],
+    ['unsupported alias', 'private'],
+    ['hostname', 'proxy.example.com'],
+    ['malformed IPv4', '203.0.113.256'],
+    ['malformed IPv4 CIDR', '10.0.0.0/33'],
+    ['zero-prefix IPv4 CIDR', '0.0.0.0/0'],
+    ['noncanonical CIDR prefix', '10.0.0.0/08'],
+    ['malformed IPv6 CIDR', 'fd00::/129'],
+    ['zero-prefix IPv6 CIDR', '::/0'],
+  ])('rejects invalid TRUST_PROXY input: %s', async (_name, value) => {
+    setEnv({ TRUST_PROXY: value });
+
+    await expect(importConfig()).rejects.toThrow(
+      'TRUST_PROXY must be "false", a canonical positive integer, or a comma-separated list',
+    );
   });
 
   it('defaults email verification on in production and requires email config', async () => {

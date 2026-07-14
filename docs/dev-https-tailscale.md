@@ -19,10 +19,15 @@ CORS_ORIGIN=https://<machine>.<tailnet>.ts.net:5200
 BETTER_AUTH_URL=https://<machine>.<tailnet>.ts.net
 MCP_CANONICAL_URL=https://<machine>.<tailnet>.ts.net/mcp
 VITE_ALLOWED_HOSTS=<machine>.<tailnet>.ts.net
+TRUST_PROXY=loopback
 ```
 
 Then restart `pnpm go` and open the web app at
 `https://<machine>.<tailnet>.ts.net:5200`.
+
+`loopback` trusts Tailscale Serve as the API's immediate local peer while still
+rejecting forwarded headers from other peers. See [Proxy trust](proxy-trust.md)
+before changing this for a different topology.
 
 For production, use the same model with real domains, for example
 `https://app.example.com` for the static frontend and `https://api.example.com`
