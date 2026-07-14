@@ -760,6 +760,71 @@ describe('DELETE /api/projects/:projectSlug/members/:userId', () => {
     });
     expect(res.statusCode).toBe(403);
   });
+
+  it('manager can remove member but not owner', async () => {
+    const { body: workspace } = await createWorkspaceViaHttp(app, aliceCookie, 'Manager Remove Owner Workspace');
+    const { body: project } = await createProjectViaHttp(app,
+      aliceCookie,
+      workspace.slug,
+      'Manager Remove Owner Project',
+    );
+    await addProjectMember(project.id, bobId, 'manager');
+    await addProjectMember(project.id, carolId, 'member');
+
+    // Manager can remove member
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/members/${carolId}`,
+      headers: { cookie: bobCookie },
+    });
+    expect(res.statusCode).toBe(204);
+
+    // But manager cannot remove the project owner
+    const res2 = await app.inject({
+      method: 'DELETE',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/members/${aliceId}`,
+      headers: { cookie: bobCookie },
+    });
+    expect(res2.statusCode).toBe(400);
+
+    // The rejected removal leaves the owner's membership intact
+    const membersRes = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/members`,
+      headers: { cookie: aliceCookie },
+    });
+    expect(membersRes.statusCode).toBe(200);
+    const members = parseJsonBody<Array<{ userId: string; role: string }>>(membersRes);
+    expect(members.find((m) => m.userId === aliceId)?.role).toBe('owner');
+  });
+
+  it('workspace manager acting via override can remove the direct project owner', async () => {
+    const { body: workspace } = await createWorkspaceViaHttp(app, aliceCookie, 'Override Remove Workspace');
+    const { body: project } = await createProjectViaHttp(app,
+      aliceCookie,
+      workspace.slug,
+      'Override Remove Project',
+    );
+    // Bob is a workspace manager with no direct project membership; the
+    // resolver presents him as synthetic project 'owner', so the guard passes.
+    await addWorkspaceMember(workspace.id, bobId, 'manager');
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/members/${aliceId}`,
+      headers: { cookie: bobCookie },
+    });
+    expect(res.statusCode).toBe(204);
+
+    const membersRes = await app.inject({
+      method: 'GET',
+      url: `/api/workspaces/${workspace.slug}/projects/${project.slug}/members`,
+      headers: { cookie: bobCookie },
+    });
+    expect(membersRes.statusCode).toBe(200);
+    const members = parseJsonBody<Array<{ userId: string }>>(membersRes);
+    expect(members.map((m) => m.userId)).not.toContain(aliceId);
+  });
 });
 
 // --- Invites ---
