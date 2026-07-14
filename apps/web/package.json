@@ -12,14 +12,14 @@
     "test": "NODE_OPTIONS='--conditions=development' vitest run"
   },
   "dependencies": {
-    "@better-auth/oauth-provider": "^1.6.5",
+    "@better-auth/oauth-provider": "^1.6.23",
     "@repo/integrations-core": "workspace:*",
     "@repo/shared": "workspace:*",
     "@repo/ui": "workspace:*",
     "@tailwindcss/typography": "^0.5.19",
     "@tanstack/react-query": "^5.65.0",
     "@tanstack/react-router": "^1.97.3",
-    "better-auth": "1.6.5",
+    "better-auth": "^1.6.23",
     "lucide-react": "^1.8.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
