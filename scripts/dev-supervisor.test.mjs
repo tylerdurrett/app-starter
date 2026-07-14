@@ -237,6 +237,9 @@ describe('CLI checkout identity', { skip: unixOnly, concurrency: false }, () => 
     const spoofedRuntime = join(parent, 'spoofed-runtime');
     mkdirSync(spoofedRuntime);
     const firstPaths = controlPaths(first);
+    const secondPaths = controlPaths(second);
+    assert.equal(existsSync(firstPaths.controlDirectory), false);
+    assert.equal(existsSync(secondPaths.controlDirectory), false);
     const supervisor = spawn(
       process.execPath,
       [firstScript, 'start', '--', process.execPath, '-e', 'setInterval(() => {}, 1000)'],
@@ -292,9 +295,14 @@ describe('CLI checkout identity', { skip: unixOnly, concurrency: false }, () => 
           }
         }
       } finally {
+        rmSync(firstPaths.controlDirectory, { recursive: true, force: true });
+        rmSync(secondPaths.controlDirectory, { recursive: true, force: true });
         rmSync(parent, { recursive: true, force: true });
       }
     }
+    assert.equal(existsSync(firstPaths.controlDirectory), false);
+    assert.equal(existsSync(secondPaths.controlDirectory), false);
+    assert.equal(existsSync(parent), false);
   });
 });
 
