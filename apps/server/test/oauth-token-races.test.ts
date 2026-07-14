@@ -86,12 +86,14 @@ async function authorize(
 async function postToken(
   app: FastifyInstance,
   params: Record<string, string>,
+  remoteAddress?: string,
 ): Promise<LightMyRequestResponse> {
   return app.inject({
     method: 'POST',
     url: '/api/auth/oauth2/token',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     payload: new URLSearchParams(params).toString(),
+    ...(remoteAddress ? { remoteAddress } : {}),
   });
 }
 
@@ -144,68 +146,85 @@ describe('OAuth token race regressions', () => {
   });
 
   it('rotates a concurrently replayed refresh token exactly once (GHSA-392p-2q2v-4372)', async () => {
-    const clientId = `race-refresh-client-${Date.now()}`;
-    await insertPublicPkceClient(clientId);
     const { cookie } = await signUp(
       app,
       `race-refresh-${Date.now()}@example.com`,
       'Refresh Race User',
     );
 
-    const { verifier, challenge } = pkcePair();
-    const code = await authorize(app, cookie, clientId, challenge);
+    // The unpatched race only manifests when the two CAS updates overlap at
+    // the database (~60% of single attempts), so run several rounds to keep
+    // this regression reliable at catching a dropped adapter patch. With the
+    // patch the outcome is deterministic (exactly one winner per round), so
+    // the loop cannot flake.
+    const ROUNDS = 5;
+    for (let round = 0; round < ROUNDS; round++) {
+      // Fresh client per round so the per-client row queries stay exact, and
+      // a fresh source IP so five rounds of token calls exercise the race
+      // instead of the per-IP auth rate limit (AUTH_RATE_LIMIT_MAX = 10/min).
+      const clientId = `race-refresh-client-${round}-${Date.now()}`;
+      const roundIp = `10.99.0.${round + 1}`;
+      await insertPublicPkceClient(clientId);
 
-    const redeem = await postToken(app, {
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: REDIRECT_URI,
-      client_id: clientId,
-      code_verifier: verifier,
-    });
-    expect(redeem.statusCode).toBe(200);
-    const refreshToken = redeem.json<TokenBody>().refresh_token;
-    expect(refreshToken).toBeTruthy();
+      const { verifier, challenge } = pkcePair();
+      const code = await authorize(app, cookie, clientId, challenge);
 
-    const parentRows = await db
-      .select({ id: oauthRefreshTokens.id, revoked: oauthRefreshTokens.revoked })
-      .from(oauthRefreshTokens)
-      .where(eq(oauthRefreshTokens.clientId, clientId));
-    expect(parentRows).toHaveLength(1);
-    const parentId = parentRows[0]!.id;
-    expect(parentRows[0]!.revoked).toBeNull();
+      const redeem = await postToken(
+        app,
+        {
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: REDIRECT_URI,
+          client_id: clientId,
+          code_verifier: verifier,
+        },
+        roundIp,
+      );
+      expect(redeem.statusCode).toBe(200);
+      const refreshToken = redeem.json<TokenBody>().refresh_token;
+      expect(refreshToken).toBeTruthy();
 
-    const rotate = {
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken as string,
-      client_id: clientId,
-    };
-    const { winners, losers } = splitRace(
-      await Promise.all([postToken(app, rotate), postToken(app, rotate)]),
-    );
+      const parentRows = await db
+        .select({ id: oauthRefreshTokens.id, revoked: oauthRefreshTokens.revoked })
+        .from(oauthRefreshTokens)
+        .where(eq(oauthRefreshTokens.clientId, clientId));
+      expect(parentRows).toHaveLength(1);
+      const parentId = parentRows[0]!.id;
+      expect(parentRows[0]!.revoked).toBeNull();
 
-    expect(winners).toHaveLength(1);
-    expect(losers).toHaveLength(1);
+      const rotate = {
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken as string,
+        client_id: clientId,
+      };
+      const { winners, losers } = splitRace(
+        await Promise.all([postToken(app, rotate, roundIp), postToken(app, rotate, roundIp)]),
+      );
 
-    const winnerBody = winners[0]!.json<TokenBody>();
-    expect(winnerBody.access_token).toBeTruthy();
-    expect(winnerBody.refresh_token).toBeTruthy();
-    expect(losers[0]!.statusCode).toBe(400);
-    expect(losers[0]!.json<TokenBody>().error).toBe('invalid_grant');
+      expect(winners, `round ${round}`).toHaveLength(1);
+      expect(losers, `round ${round}`).toHaveLength(1);
 
-    // The parent row must be marked revoked by the winning rotation. Checked
-    // before the replay below: replaying a revoked token tears down the whole
-    // token family (RFC 9700 §4.14), deleting the row we assert on.
-    const [parentRow] = await db
-      .select({ revoked: oauthRefreshTokens.revoked })
-      .from(oauthRefreshTokens)
-      .where(eq(oauthRefreshTokens.id, parentId));
-    expect(parentRow).toBeDefined();
-    expect(parentRow!.revoked).not.toBeNull();
+      const winnerBody = winners[0]!.json<TokenBody>();
+      expect(winnerBody.access_token).toBeTruthy();
+      expect(winnerBody.refresh_token).toBeTruthy();
+      expect(losers[0]!.statusCode).toBe(400);
+      expect(losers[0]!.json<TokenBody>().error).toBe('invalid_grant');
 
-    // Replaying the rotated-out parent token must fail closed.
-    const replay = await postToken(app, rotate);
-    expect(replay.statusCode).toBe(400);
-    expect(replay.json<TokenBody>().error).toBe('invalid_grant');
+      // The parent row must be marked revoked by the winning rotation. Checked
+      // before the replay below: replaying a revoked token tears down the
+      // whole token family (RFC 9700 §4.14), deleting the row we assert on.
+      const [parentRow] = await db
+        .select({ revoked: oauthRefreshTokens.revoked })
+        .from(oauthRefreshTokens)
+        .where(eq(oauthRefreshTokens.id, parentId));
+      expect(parentRow).toBeDefined();
+      expect(parentRow!.revoked).not.toBeNull();
+
+      // Replaying the rotated-out parent token must fail closed.
+      const replay = await postToken(app, rotate, roundIp);
+      expect(replay.statusCode).toBe(400);
+      expect(replay.json<TokenBody>().error).toBe('invalid_grant');
+    }
 
     // Deliberately NOT asserted: the winner's new refresh token dying after
     // the replay. Strict RFC 9700 family invalidation is deferred upstream
