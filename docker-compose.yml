@@ -1,14 +1,19 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: app-starter-postgres
     restart: unless-stopped
     ports:
-      - "${DB_PORT}:5432"
+      - '${DB_PORT}:5432'
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
     volumes:
       - pgdata:/var/lib/postgresql/data
 
