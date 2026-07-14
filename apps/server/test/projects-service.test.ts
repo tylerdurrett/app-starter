@@ -282,6 +282,71 @@ describe('removeMember', () => {
       code: 'NOT_FOUND',
     });
   });
+
+  it('manager cannot remove the project owner (BAD_REQUEST)', async () => {
+    const proj = await createProjectForTest('Manager Vs Owner Proj', aliceId);
+    // Bob is a manager (has members:remove) but must not remove the owner.
+    await addProjectMember(proj.id, bobId, 'manager');
+
+    await expect(removeMember(proj.slug, bobId, aliceId, workspaceSlug)).rejects.toMatchObject({
+      code: 'BAD_REQUEST',
+    });
+
+    // The rejected removal must leave the owner's membership row untouched.
+    const [ownerRow] = await db
+      .select()
+      .from(projectMemberships)
+      .where(
+        and(eq(projectMemberships.projectId, proj.id), eq(projectMemberships.userId, aliceId)),
+      );
+    expect(ownerRow.role).toBe('owner');
+  });
+
+  it('manager can still remove a non-owner member', async () => {
+    const proj = await createProjectForTest('Manager Removes Member Proj', aliceId);
+    await addProjectMember(proj.id, bobId, 'manager');
+    const ts = Date.now();
+    const memberId = (await signUp(app, `member-removable-${ts}@test.com`, 'Removable')).userId;
+    await addProjectMember(proj.id, memberId, 'member');
+
+    await removeMember(proj.slug, bobId, memberId, workspaceSlug);
+
+    const members = await listMembers(proj.slug, aliceId, workspaceSlug);
+    expect(members.map((m) => m.userId)).not.toContain(memberId);
+  });
+
+  it('workspace owner acting via override can remove the direct project owner', async () => {
+    const ws = await createWorkspaceForTest('Override Owner Remove Ws', aliceId);
+    // Bob is the direct project owner; alice has no direct project membership,
+    // so she acts through the workspace-owner override (synthetic 'owner').
+    const proj = await createProjectForTest('Override Owner Remove Proj', bobId, { wsId: ws.id });
+
+    await removeMember(proj.slug, aliceId, bobId, ws.slug);
+
+    const [bobRow] = await db
+      .select()
+      .from(projectMemberships)
+      .where(and(eq(projectMemberships.projectId, proj.id), eq(projectMemberships.userId, bobId)));
+    expect(bobRow).toBeUndefined();
+  });
+
+  it('workspace manager acting via override can remove the direct project owner', async () => {
+    const ws = await createWorkspaceForTest('Override Manager Remove Ws', aliceId);
+    const proj = await createProjectForTest('Override Manager Remove Proj', bobId, { wsId: ws.id });
+    const ts = Date.now();
+    const managerId = (await signUp(app, `ws-manager-${ts}@test.com`, 'Ws Manager')).userId;
+    // A workspace-level manager presents as synthetic project 'owner' via the
+    // override, so the owner guard must not block this removal.
+    await addWorkspaceMember(ws.id, managerId, 'manager');
+
+    await removeMember(proj.slug, managerId, bobId, ws.slug);
+
+    const [bobRow] = await db
+      .select()
+      .from(projectMemberships)
+      .where(and(eq(projectMemberships.projectId, proj.id), eq(projectMemberships.userId, bobId)));
+    expect(bobRow).toBeUndefined();
+  });
 });
 
 describe('workspace-scoped slug threading through service wrappers', () => {
