@@ -221,6 +221,32 @@ describe('safe control state handling', { skip: unixOnly }, () => {
     await channels[0].close();
   });
 
+  it('keeps a live lease authoritative after its public socket is removed', async () => {
+    const { checkoutRoot, runtimeRoot } = temporaryCheckout();
+    const paths = controlPaths(checkoutRoot, runtimeRoot);
+    const channel = await createControlChannel(paths, () => {});
+    const privateSocket = readFileSync(join(paths.lockDirectory, 'socket'), 'utf8').trim();
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_100));
+    unlinkSync(paths.socketPath);
+
+    await assert.rejects(
+      preflight({ checkoutRoot, runtimeRoot, checkPort: async () => true }),
+      /already managed/,
+    );
+    await assert.rejects(
+      createControlChannel(paths, () => {}),
+      /already managed/,
+    );
+    assert.equal(existsSync(paths.lockDirectory), true);
+    assert.equal(existsSync(privateSocket), true);
+
+    await channel.close();
+    assert.equal(existsSync(paths.lockDirectory), false);
+    assert.equal(existsSync(paths.tokenPath), false);
+    assert.equal(existsSync(privateSocket), false);
+  });
+
   it('does not unlink a replacement listener it does not own during cleanup', async () => {
     const { checkoutRoot, runtimeRoot } = temporaryCheckout();
     const paths = controlPaths(checkoutRoot, runtimeRoot);

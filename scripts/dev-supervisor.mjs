@@ -35,6 +35,8 @@ const MAX_REQUEST_BYTES = 4_096;
 const DEFAULT_TERMINATION_GRACE_MS = 5_000;
 const MAX_UNIX_SOCKET_PATH_BYTES = 100;
 const LOCK_STALE_MS = 2_000;
+const LOCK_HEARTBEAT_MS = 250;
+const LOCK_RECLAIM_CONFIRM_MS = 300;
 const GROUP_EXIT_POLL_MS = 10;
 
 function ignoreMissing(path) {
@@ -180,42 +182,53 @@ function readLockOwner(paths) {
   }
 }
 
-function lockIsStale(paths, now = Date.now()) {
+function lockSnapshot(lockDirectory) {
   try {
-    return now - statSync(paths.lockDirectory).mtimeMs >= LOCK_STALE_MS;
+    const stat = statSync(lockDirectory);
+    let privateSocket = null;
+    try {
+      privateSocket = readFileSync(join(lockDirectory, 'socket'), 'utf8').trim() || null;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    return {
+      owner: readFileSync(join(lockDirectory, 'owner'), 'utf8').trim(),
+      mtimeMs: stat.mtimeMs,
+      privateSocket,
+    };
   } catch (error) {
-    if (error.code === 'ENOENT') return true;
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
     throw error;
   }
 }
 
-function removeStaleLock(paths) {
-  const quarantine = `${paths.lockDirectory}.stale-${randomBytes(8).toString('hex')}`;
-  try {
-    renameSync(paths.lockDirectory, quarantine);
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw error;
-  }
-  rmSync(quarantine, { recursive: true, force: true });
-  return true;
+function sameLockSnapshot(first, second) {
+  return (
+    first?.owner === second?.owner &&
+    first?.mtimeMs === second?.mtimeMs &&
+    first?.privateSocket === second?.privateSocket
+  );
 }
 
-function tryAcquireControlLock(paths, { reclaimStale = false } = {}) {
+function lockIsStale(snapshot, now = Date.now()) {
+  return snapshot !== null && now - snapshot.mtimeMs >= LOCK_STALE_MS;
+}
+
+function tryAcquireControlLock(paths) {
   ensureControlDirectory(paths);
   const owner = randomBytes(TOKEN_BYTES).toString('hex');
-  for (;;) {
-    try {
-      mkdirSync(paths.lockDirectory, { mode: 0o700 });
-      writeFileSync(join(paths.lockDirectory, 'owner'), `${owner}\n`, {
-        flag: 'wx',
-        mode: 0o600,
-      });
-      break;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      if (!reclaimStale || !lockIsStale(paths) || !removeStaleLock(paths)) return null;
-    }
+  let directoryCreated = false;
+  try {
+    mkdirSync(paths.lockDirectory, { mode: 0o700 });
+    directoryCreated = true;
+    writeFileSync(join(paths.lockDirectory, 'owner'), `${owner}\n`, {
+      flag: 'wx',
+      mode: 0o600,
+    });
+  } catch (error) {
+    if (!directoryCreated && error.code === 'EEXIST') return null;
+    if (directoryCreated) rmSync(paths.lockDirectory, { recursive: true, force: true });
+    throw error;
   }
 
   const ownsLock = () => readLockOwner(paths) === owner;
@@ -235,6 +248,50 @@ function tryAcquireControlLock(paths, { reclaimStale = false } = {}) {
       rmSync(paths.lockDirectory, { recursive: true });
     },
   };
+}
+
+function wait(milliseconds) {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+}
+
+async function queryPrivateControl(paths, snapshot, command, options) {
+  if (!snapshot?.privateSocket) return null;
+  return queryControl({ ...paths, socketPath: snapshot.privateSocket }, command, options);
+}
+
+async function reclaimStaleControlLock(paths, command, options) {
+  const first = lockSnapshot(paths.lockDirectory);
+  if (!lockIsStale(first)) return false;
+  const firstPrivateControl = await queryPrivateControl(paths, first, command, options);
+  if (firstPrivateControl?.listener) return false;
+
+  await wait(LOCK_RECLAIM_CONFIRM_MS);
+  const confirmed = lockSnapshot(paths.lockDirectory);
+  if (!sameLockSnapshot(first, confirmed) || !lockIsStale(confirmed)) return false;
+  const confirmedPrivateControl = await queryPrivateControl(paths, confirmed, command, options);
+  if (confirmedPrivateControl?.listener) return false;
+
+  const quarantine = `${paths.lockDirectory}.stale-${randomBytes(8).toString('hex')}`;
+  try {
+    renameSync(paths.lockDirectory, quarantine);
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+
+  // A heartbeat may land after the last read but before rename. Revalidate the
+  // quarantined lease and restore it when no contender has claimed the path.
+  if (!sameLockSnapshot(confirmed, lockSnapshot(quarantine))) {
+    try {
+      renameSync(quarantine, paths.lockDirectory);
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      rmSync(quarantine, { recursive: true, force: true });
+    }
+    return false;
+  }
+  rmSync(quarantine, { recursive: true, force: true });
+  return true;
 }
 
 function tokensMatch(actual, expected) {
@@ -322,8 +379,13 @@ export async function inspectControl(paths, command = 'status', options) {
   if (result.listener) return result;
 
   let lock = tryAcquireControlLock(paths);
-  if (!lock && lockIsStale(paths)) {
-    lock = tryAcquireControlLock(paths, { reclaimStale: true });
+  if (!lock) {
+    const ownerSnapshot = lockSnapshot(paths.lockDirectory);
+    const privateControl = await queryPrivateControl(paths, ownerSnapshot, command, options);
+    if (privateControl?.listener) return privateControl;
+    if (await reclaimStaleControlLock(paths, command, options)) {
+      lock = tryAcquireControlLock(paths);
+    }
   }
   if (!lock) return result;
   try {
@@ -433,6 +495,7 @@ export async function createControlChannel(paths, onStop) {
   let socketOwned = false;
   let tokenPublished = false;
   let tokenIdentity;
+  let heartbeat;
   const server = createServer((socket) => {
     connections.add(socket);
     socket.once('close', () => connections.delete(socket));
@@ -485,22 +548,45 @@ export async function createControlChannel(paths, onStop) {
     await listen(server, ownedSocket);
     socketOwned = true;
     chmodSync(ownedSocket, 0o600);
+    writeFileSync(join(paths.lockDirectory, 'socket'), `${ownedSocket}\n`, {
+      flag: 'wx',
+      mode: 0o600,
+    });
+    lock.refresh();
     symlinkSync(ownedSocket, paths.socketPath);
     if (!lock.ownsLock()) throw new Error('Checkout control ownership was lost.');
     writeControlToken(paths.tokenPath, token);
     tokenPublished = true;
     tokenIdentity = fileIdentity(paths.tokenPath);
     lock.refresh();
+    heartbeat = setInterval(() => {
+      try {
+        lock.refresh();
+      } catch (error) {
+        clearInterval(heartbeat);
+        console.error(`Development supervisor lost its control lease: ${error.message}`);
+        try {
+          onStop();
+        } catch (stopError) {
+          console.error(stopError);
+        }
+      }
+    }, LOCK_HEARTBEAT_MS);
+    heartbeat.unref?.();
   } catch (error) {
+    clearInterval(heartbeat);
+    const ownsLock = lock.ownsLock();
     if (socketOwned) {
       await new Promise((resolvePromise) => server.close(() => resolvePromise()));
-      if (socketLinkOwned(paths, ownedSocket)) ignoreMissing(paths.socketPath);
+      if (ownsLock && socketLinkOwned(paths, ownedSocket)) ignoreMissing(paths.socketPath);
       ignoreMissing(ownedSocket);
     }
     // Never unlink state we did not publish: it may belong to a live listener
     // that won the control-address race.
-    if (tokenPublished && sameFile(paths.tokenPath, tokenIdentity)) ignoreMissing(paths.tokenPath);
-    lock.release();
+    if (ownsLock && tokenPublished && sameFile(paths.tokenPath, tokenIdentity)) {
+      ignoreMissing(paths.tokenPath);
+    }
+    if (ownsLock) lock.release();
     throw error;
   }
 
@@ -510,13 +596,15 @@ export async function createControlChannel(paths, onStop) {
     async close() {
       if (closed) return;
       closed = true;
-      lock.refresh();
+      clearInterval(heartbeat);
+      const ownsLock = lock.ownsLock();
+      if (ownsLock) lock.refresh();
       for (const socket of connections) socket.destroy();
       await new Promise((resolvePromise) => server.close(() => resolvePromise()));
-      if (sameFile(paths.tokenPath, tokenIdentity)) ignoreMissing(paths.tokenPath);
-      if (socketLinkOwned(paths, ownedSocket)) ignoreMissing(paths.socketPath);
+      if (ownsLock && sameFile(paths.tokenPath, tokenIdentity)) ignoreMissing(paths.tokenPath);
+      if (ownsLock && socketLinkOwned(paths, ownedSocket)) ignoreMissing(paths.socketPath);
       ignoreMissing(ownedSocket);
-      lock.release();
+      if (ownsLock) lock.release();
     },
   };
 }
