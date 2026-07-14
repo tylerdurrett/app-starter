@@ -60,13 +60,38 @@ function writeConfig(serverPort, dbPort, webPort) {
   console.log(`  webPort:    ${webPort}`);
 }
 
-/** Read existing .env file and parse into key-value pairs */
+/** Read the existing .env source, or an empty file when it does not exist. */
 function readEnvFile() {
   try {
-    return parseEnvironmentFile(readFileSync(envPath));
+    return readFileSync(envPath, 'utf8');
   } catch {
-    return {};
+    return '';
   }
+}
+
+function serializeEnvironmentValue(value) {
+  const text = String(value);
+  if (text.trim() === text && !/[#\r\n]/.test(text)) return text;
+  if (!text.includes("'")) return `'${text}'`;
+  if (!text.includes('`')) return `\`${text}\``;
+  if (!text.includes('"') && !/\\[nr]/.test(text)) return `"${text}"`;
+  throw new Error('Cannot safely serialize managed .env value.');
+}
+
+/** Update managed keys while retaining unrelated .env lines byte-for-byte. */
+export function updateEnvironmentFile(source, managed) {
+  const pending = new Set(Object.keys(managed));
+  const assignment =
+    /(^|\n)[^\S\r\n]*(?:export[^\S\r\n]+)?([\w.-]+)(?:[^\S\r\n]*=[^\S\r\n]*|:[^\S\r\n]+)(?:[^\S\r\n]*'(?:\\'|[^'])*'|[^\S\r\n]*"(?:\\"|[^"])*"|[^\S\r\n]*`(?:\\`|[^`])*`|[^#\r\n]+)?[^\S\r\n]*(?:#.*)?(?=\r?\n|$)/g;
+  let updated = source.replace(assignment, (match, prefix, key) => {
+    if (!Object.hasOwn(managed, key)) return match;
+    pending.delete(key);
+    return `${prefix}${key}=${serializeEnvironmentValue(managed[key])}`;
+  });
+
+  if (!updated.endsWith('\n') && updated !== '') updated += '\n';
+  for (const key of pending) updated += `${key}=${serializeEnvironmentValue(managed[key])}\n`;
+  return updated;
 }
 
 /** Generate a random secret for Better Auth */
@@ -135,7 +160,8 @@ export function resolveManagedEnv(existing, { dbPort, webPort, serverPort }) {
 }
 
 function writeEnvFile(dbPort, webPort, serverPort) {
-  const existing = readEnvFile();
+  const source = readEnvFile();
+  const existing = parseEnvironmentFile(source);
 
   // Generated values that we manage
   const managed = resolveManagedEnv(existing, { dbPort, webPort, serverPort });
@@ -151,16 +177,7 @@ function writeEnvFile(dbPort, webPort, serverPort) {
     console.log('Generated CREDENTIAL_ENCRYPTION_KEY (stored in .env)');
   }
 
-  // Merge with existing, managed values take precedence
-  const final = { ...existing, ...managed };
-
-  // Write back to file
-  const content =
-    Object.entries(final)
-      .map(([key, value]) => `${key}=${value}`)
-      .join('\n') + '\n';
-
-  writeFileSync(envPath, content);
+  writeFileSync(envPath, updateEnvironmentFile(source, managed));
   console.log(`Updated ${envPath}`);
 }
 

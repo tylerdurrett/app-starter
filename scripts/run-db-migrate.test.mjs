@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { dirname, resolve } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import { resolveDatabaseEnvironment } from './database-env.mjs';
 import { runDatabaseMigration } from './run-db-migrate.mjs';
+
+const execFileAsync = promisify(execFile);
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 test('readiness and migration receive byte-identical resolved database settings', async () => {
   const resolved = resolveDatabaseEnvironment({
@@ -43,4 +50,23 @@ test('migration does not run when readiness fails', async () => {
     /database not ready/,
   );
   assert.equal(calls, 1);
+});
+
+test('top-level migration errors do not log malformed database credentials', async () => {
+  const secret = 'do-not-log-this-password';
+  await assert.rejects(
+    execFileAsync(process.execPath, ['scripts/run-db-migrate.mjs'], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        DATABASE_MODE: 'external',
+        DATABASE_URL: `postgresql://admin:${secret}@[invalid-host/app`,
+      },
+    }),
+    (error) => {
+      assert.match(error.stderr, /DATABASE_URL must be a valid PostgreSQL URL/);
+      assert.doesNotMatch(error.stderr, new RegExp(secret));
+      return true;
+    },
+  );
 });

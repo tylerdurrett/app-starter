@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { describe, it } from 'node:test';
 import { findFreePort, isPortAvailable, PORT_PROBE_HOSTS } from './port-availability.mjs';
 import { parseEnvironmentFile } from './database-env.mjs';
-import { askPort, resolveManagedEnv } from './setup.mjs';
+import { askPort, resolveManagedEnv, updateEnvironmentFile } from './setup.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -238,18 +238,28 @@ describe('--ensure config stability', () => {
   it('writes compose mode and the configured local URL over a custom URL', async () => {
     const fixture = await createSetupFixture();
     const config = { serverPort: 6100, dbPort: 6150, webPort: 6200 };
+    const unrelated = [
+      'HASHED="value # with a comment character"',
+      'QUOTED=`single \' and double " quotes`',
+      "ESCAPED='literal\\nvalue'",
+      "MULTILINE='first line\nsecond line'",
+    ].join('\n');
     await writeFile(
       join(fixture.directory, 'project.config.json'),
       `${JSON.stringify(config, null, 2)}\n`,
     );
     await writeFile(
       join(fixture.directory, '.env'),
-      'DATABASE_URL=postgresql://another-project.example.com/app\n',
+      `${unrelated}\nDATABASE_URL=postgresql://another-project.example.com/app\n`,
     );
+    const before = parseEnvironmentFile(unrelated);
 
     try {
       await execFileAsync(process.execPath, [fixture.setupPath, '--ensure']);
-      const env = parseEnvironmentFile(await readFile(join(fixture.directory, '.env')));
+      const source = await readFile(join(fixture.directory, '.env'), 'utf8');
+      const env = parseEnvironmentFile(source);
+      for (const key of Object.keys(before)) assert.equal(env[key], before[key]);
+      assert.ok(source.includes(unrelated));
       assert.equal(env.DATABASE_MODE, 'compose');
       assert.equal(env.DB_PORT, '6150');
       assert.equal(env.DATABASE_URL, 'postgresql://postgres:postgres@127.0.0.1:6150/postgres');
@@ -355,5 +365,48 @@ describe('resolveManagedEnv', () => {
       () => resolveManagedEnv({ DATABASE_MODE: 'external', DATABASE_URL: 'not-a-url' }, ports),
       /valid PostgreSQL URL/,
     );
+  });
+});
+
+describe('updateEnvironmentFile', () => {
+  it('round-trips unrelated quoted, hash, escaped, and multiline values', () => {
+    const source = [
+      '# Preserve this comment and every unrelated assignment exactly.',
+      'HASHED="value # with a comment character"',
+      'QUOTED=`single \' and double " quotes`',
+      "ESCAPED='literal\\nvalue'",
+      "MULTILINE='first line\nsecond line'",
+      'UNRELATED=plain-value # keep this comment',
+      '',
+      'DATABASE_MODE=compose',
+      'DATABASE_URL=postgresql://old.example.com/old',
+      '',
+      '# Preserve trailing comments too.',
+      '',
+    ].join('\n');
+    const before = parseEnvironmentFile(source);
+
+    const updated = updateEnvironmentFile(source, {
+      DATABASE_MODE: 'external',
+      DATABASE_URL: 'postgresql://user:secret@database.example.com:6543/app',
+      DB_PORT: '6543',
+    });
+    const after = parseEnvironmentFile(updated);
+
+    for (const key of ['HASHED', 'QUOTED', 'ESCAPED', 'MULTILINE', 'UNRELATED']) {
+      assert.equal(after[key], before[key]);
+    }
+    for (const line of source.split('\n').slice(0, 6)) assert.ok(updated.includes(line));
+    assert.match(updated, /UNRELATED=plain-value # keep this comment\n\nDATABASE_MODE=external/);
+    assert.match(updated, /DATABASE_URL=.*\n\n# Preserve trailing comments too\.\n/);
+    assert.equal(after.DATABASE_MODE, 'external');
+    assert.equal(after.DATABASE_URL, 'postgresql://user:secret@database.example.com:6543/app');
+    assert.equal(after.DB_PORT, '6543');
+  });
+
+  it('quotes a managed hash value without changing backslashes', () => {
+    const value = "hash# single' backtick` slash\\x";
+    const updated = updateEnvironmentFile('', { MANAGED: value });
+    assert.equal(parseEnvironmentFile(updated).MANAGED, value);
   });
 });

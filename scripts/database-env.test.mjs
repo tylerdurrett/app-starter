@@ -137,4 +137,19 @@ describe('parseDatabaseUrl', () => {
       port: 5432,
     });
   });
+
+  it('does not retain credentials when URL parsing fails', () => {
+    const secret = 'do-not-log-this-password';
+    let failure;
+    try {
+      parseDatabaseUrl(`postgresql://admin:${secret}@[invalid-host/app`);
+    } catch (error) {
+      failure = error;
+    }
+
+    assert.ok(failure);
+    assert.equal(failure.cause, undefined);
+    assert.match(failure.message, /valid PostgreSQL URL/);
+    assert.doesNotMatch(failure.stack, new RegExp(secret));
+  });
 });

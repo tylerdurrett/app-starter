@@ -54,8 +54,9 @@ export function parseDatabaseUrl(value) {
   let url;
   try {
     url = new URL(value);
-  } catch (error) {
-    throw new Error('DATABASE_URL must be a valid PostgreSQL URL.', { cause: error });
+  } catch {
+    // URL errors include the original input, which may contain credentials.
+    throw new Error('DATABASE_URL must be a valid PostgreSQL URL.');
   }
 
   if (!POSTGRES_PROTOCOLS.has(url.protocol) || !url.hostname) {
@@ -92,9 +93,7 @@ export function resolveDatabaseEnvironment({
   const mode = environment.DATABASE_MODE ?? 'compose';
 
   if (mode !== 'compose' && mode !== 'external') {
-    throw new Error(
-      `Invalid DATABASE_MODE=${JSON.stringify(mode)}; expected "compose" or "external".`,
-    );
+    throw new Error('Invalid DATABASE_MODE; expected "compose" or "external".');
   }
 
   let databaseUrl;
