@@ -8,12 +8,13 @@
  *   node scripts/setup.mjs --ensure   # non-interactive — reuse or auto-pick
  */
 
-import { createServer } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
+import { parseEnvironmentFile, resolveDatabaseEnvironment } from './database-env.mjs';
+import { findFreePort, isPortAvailable } from './port-availability.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -32,26 +33,6 @@ const ensureMode = process.argv.includes('--ensure');
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Resolve true if the port is free, false otherwise. */
-function isPortFree(port) {
-  return new Promise((res) => {
-    const srv = createServer();
-    srv.unref();
-    srv.on('error', () => srv.close(() => res(false)));
-    srv.listen(port, '127.0.0.1', () => {
-      srv.close(() => res(true));
-    });
-  });
-}
-
-/** Find the first free port in [start, end]. Returns null if none available. */
-async function findFreePort(start, end) {
-  for (let port = start; port <= end; port++) {
-    if (await isPortFree(port)) return port;
-  }
-  return null;
-}
 
 /** Read an existing project.config.json, or null if missing / invalid. */
 function readConfig() {
@@ -79,23 +60,38 @@ function writeConfig(serverPort, dbPort, webPort) {
   console.log(`  webPort:    ${webPort}`);
 }
 
-/** Read existing .env file and parse into key-value pairs */
+/** Read the existing .env source, or an empty file when it does not exist. */
 function readEnvFile() {
   try {
-    const content = readFileSync(envPath, 'utf-8');
-    const env = {};
-    for (const line of content.split('\n')) {
-      if (line.trim() && !line.startsWith('#')) {
-        const [key, ...valueParts] = line.split('=');
-        if (key) {
-          env[key.trim()] = valueParts.join('=').trim();
-        }
-      }
-    }
-    return env;
+    return readFileSync(envPath, 'utf8');
   } catch {
-    return {};
+    return '';
   }
+}
+
+function serializeEnvironmentValue(value) {
+  const text = String(value);
+  if (text.trim() === text && !/[#\r\n]/.test(text)) return text;
+  if (!text.includes("'")) return `'${text}'`;
+  if (!text.includes('`')) return `\`${text}\``;
+  if (!text.includes('"') && !/\\[nr]/.test(text)) return `"${text}"`;
+  throw new Error('Cannot safely serialize managed .env value.');
+}
+
+/** Update managed keys while retaining unrelated .env lines byte-for-byte. */
+export function updateEnvironmentFile(source, managed) {
+  const pending = new Set(Object.keys(managed));
+  const assignment =
+    /(^|\n)[^\S\r\n]*(?:export[^\S\r\n]+)?([\w.-]+)(?:[^\S\r\n]*=[^\S\r\n]*|:[^\S\r\n]+)(?:[^\S\r\n]*'(?:\\'|[^'])*'|[^\S\r\n]*"(?:\\"|[^"])*"|[^\S\r\n]*`(?:\\`|[^`])*`|[^#\r\n]+)?[^\S\r\n]*(?:#.*)?(?=\r?\n|$)/g;
+  let updated = source.replace(assignment, (match, prefix, key) => {
+    if (!Object.hasOwn(managed, key)) return match;
+    pending.delete(key);
+    return `${prefix}${key}=${serializeEnvironmentValue(managed[key])}`;
+  });
+
+  if (!updated.endsWith('\n') && updated !== '') updated += '\n';
+  for (const key of pending) updated += `${key}=${serializeEnvironmentValue(managed[key])}\n`;
+  return updated;
 }
 
 /** Generate a random secret for Better Auth */
@@ -125,6 +121,11 @@ function isLocalDevUrl(value, path = '/') {
 
 /** Upsert .env values - preserve existing, update/add generated ones */
 export function resolveManagedEnv(existing, { dbPort, webPort, serverPort }) {
+  const database = resolveDatabaseEnvironment({
+    config: { dbPort },
+    fileEnv: existing,
+    inheritedEnv: {},
+  });
   const localAuthUrl = `http://localhost:${serverPort}`;
   const localWebUrl = `http://localhost:${webPort}`;
   const authUrl =
@@ -146,7 +147,8 @@ export function resolveManagedEnv(existing, { dbPort, webPort, serverPort }) {
 
   return {
     DB_PORT: String(dbPort),
-    DATABASE_URL: `postgresql://postgres:postgres@127.0.0.1:${dbPort}/postgres`,
+    DATABASE_MODE: database.mode,
+    DATABASE_URL: database.databaseUrl,
     // Preserve custom HTTPS origins used by Tailscale Serve or production-like
     // local testing. Overwriting them during `pnpm go` breaks CORS/cookie auth.
     CORS_ORIGIN: webUrl,
@@ -158,7 +160,8 @@ export function resolveManagedEnv(existing, { dbPort, webPort, serverPort }) {
 }
 
 function writeEnvFile(dbPort, webPort, serverPort) {
-  const existing = readEnvFile();
+  const source = readEnvFile();
+  const existing = parseEnvironmentFile(source);
 
   // Generated values that we manage
   const managed = resolveManagedEnv(existing, { dbPort, webPort, serverPort });
@@ -174,16 +177,7 @@ function writeEnvFile(dbPort, webPort, serverPort) {
     console.log('Generated CREDENTIAL_ENCRYPTION_KEY (stored in .env)');
   }
 
-  // Merge with existing, managed values take precedence
-  const final = { ...existing, ...managed };
-
-  // Write back to file
-  const content =
-    Object.entries(final)
-      .map(([key, value]) => `${key}=${value}`)
-      .join('\n') + '\n';
-
-  writeFileSync(envPath, content);
+  writeFileSync(envPath, updateEnvironmentFile(source, managed));
   console.log(`Updated ${envPath}`);
 }
 
@@ -199,14 +193,24 @@ function ask(question) {
 }
 
 /** Prompt for a port, validate, and return the chosen value. */
-async function askPort(label, defaultPort) {
-  const answer = await ask(`${label} port [${defaultPort}]: `);
-  const chosen = answer === '' ? defaultPort : parseInt(answer, 10);
-  if (Number.isNaN(chosen) || chosen < 1 || chosen > 65535) {
-    console.error(`Invalid port: "${answer}"`);
-    process.exit(1);
+export async function askPort(
+  label,
+  defaultPort,
+  { askFn = ask, isPortAvailableFn = isPortAvailable, reportError = console.error } = {},
+) {
+  while (true) {
+    const answer = await askFn(`${label} port [${defaultPort}]: `);
+    const chosen = answer === '' ? defaultPort : Number(answer);
+    if (!Number.isInteger(chosen) || chosen < 1 || chosen > 65535) {
+      reportError(`Invalid port: "${answer}"`);
+      continue;
+    }
+    if (!(await isPortAvailableFn(chosen))) {
+      reportError(`Port ${chosen} is already in use or unavailable.`);
+      continue;
+    }
+    return chosen;
   }
-  return chosen;
 }
 
 // ---------------------------------------------------------------------------
