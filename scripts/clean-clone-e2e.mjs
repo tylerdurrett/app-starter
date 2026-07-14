@@ -246,6 +246,32 @@ async function inspectContainer(container, env, label, echo = false) {
   return inspections[0];
 }
 
+function expectedRogueMappings() {
+  return ROGUE_PORTS.map((port) => `127.0.0.1:${port}`).sort();
+}
+
+export function assertRunningRogue(inspection, rogue) {
+  assert.equal(inspection.Id, rogue.containerId, 'Rogue container identity changed.');
+  assert.equal(
+    String(inspection.Name).replace(/^\//, ''),
+    rogue.name,
+    'Rogue container name changed.',
+  );
+  assert.equal(
+    inspection.Config?.Labels?.['app-starter.clean-clone-e2e'],
+    rogue.runId,
+    'Rogue container ownership label changed.',
+  );
+  assert.equal(inspection.State?.Running, true, 'Rogue Postgres must still be running.');
+  assert.equal(inspection.State?.Status, 'running', 'Rogue Postgres must still be running.');
+  const publishedPorts = inspection.HostConfig?.PortBindings?.['5432/tcp'] ?? [];
+  assert.deepEqual(
+    publishedPorts.map(({ HostIp, HostPort }) => `${HostIp}:${HostPort}`).sort(),
+    expectedRogueMappings(),
+    'Rogue Postgres must still own every first candidate port on IPv4 loopback.',
+  );
+}
+
 async function startRoguePostgres(rogue, env) {
   const args = [
     'run',
@@ -273,12 +299,7 @@ async function startRoguePostgres(rogue, env) {
   rogue.containerId = result.stdout.trim();
   assert.match(rogue.containerId, /^[a-f0-9]{12,64}$/);
   const inspection = await inspectContainer(rogue.containerId, env, 'rogue:inspect');
-  const publishedPorts = inspection.HostConfig?.PortBindings?.['5432/tcp'] ?? [];
-  assert.deepEqual(
-    publishedPorts.map(({ HostIp, HostPort }) => `${HostIp}:${HostPort}`).sort(),
-    ROGUE_PORTS.map((port) => `127.0.0.1:${port}`).sort(),
-    'Rogue Postgres must publish every first candidate port on IPv4 loopback.',
-  );
+  assertRunningRogue(inspection, rogue);
 
   await waitUntil('rogue Postgres readiness log', 60_000, async () => {
     const logs = await readRogueLogs(rogue, env, false);
@@ -344,6 +365,11 @@ export function assertRogueSilent(baseline, current) {
   return { suffix, ...counts };
 }
 
+export function assertRogueProof(rogue, inspection, baseline, current) {
+  assertRunningRogue(inspection, rogue);
+  return assertRogueSilent(baseline, current);
+}
+
 async function createClone(sourceRoot, commit, destination, label, env) {
   await runBounded(
     'git',
@@ -370,15 +396,170 @@ async function createClone(sourceRoot, commit, destination, label, env) {
       },
     ),
   ]);
+  const root = await realpath(destination);
   return {
     label,
-    root: await realpath(destination),
+    root,
     env: { ...env },
     config: null,
     go: null,
     compose: null,
     stopped: false,
+    cleanup: {
+      project: composeProjectName(root),
+      prestateEmpty: false,
+      goAttempted: false,
+      owned: null,
+    },
   };
+}
+
+function outputLines(value) {
+  return value.trim().split(/\s+/).filter(Boolean).sort();
+}
+
+async function projectResourceReferences(checkout, label = checkout.label) {
+  const filter = `label=com.docker.compose.project=${checkout.cleanup.project}`;
+  const options = {
+    env: checkout.env,
+    timeoutMs: 20_000,
+    echo: false,
+  };
+  const [containers, volumes, networks] = await settleAll(
+    [
+      runBounded('docker', ['ps', '--all', '--quiet', '--filter', filter], {
+        ...options,
+        label: `${label}:project-containers`,
+      }),
+      runBounded('docker', ['volume', 'ls', '--quiet', '--filter', filter], {
+        ...options,
+        label: `${label}:project-volumes`,
+      }),
+      runBounded('docker', ['network', 'ls', '--quiet', '--filter', filter], {
+        ...options,
+        label: `${label}:project-networks`,
+      }),
+    ],
+    `${label} Compose resource query`,
+  );
+  return {
+    containers: outputLines(containers.stdout),
+    volumes: outputLines(volumes.stdout),
+    networks: outputLines(networks.stdout),
+  };
+}
+
+function resourceReferenceCount(resources) {
+  return resources.containers.length + resources.volumes.length + resources.networks.length;
+}
+
+export function assertEmptyComposePrestate(resources, project) {
+  assert.equal(
+    resourceReferenceCount(resources),
+    0,
+    `Refusing checkout project ${project}: Compose resources already exist (${JSON.stringify(resources)}).`,
+  );
+}
+
+async function prepareComposeCleanup(checkout) {
+  const resources = await projectResourceReferences(checkout, `${checkout.label}:prestate`);
+  assertEmptyComposePrestate(resources, checkout.cleanup.project);
+  checkout.cleanup.prestateEmpty = true;
+  process.stdout.write(
+    `[${checkout.label}] Compose project ${checkout.cleanup.project} has an empty prestate.\n`,
+  );
+}
+
+async function inspectResourceGroup(kind, references, checkout, label) {
+  if (references.length === 0) return [];
+  const prefix = kind === 'container' ? [] : [kind];
+  const result = await runBounded('docker', [...prefix, 'inspect', ...references], {
+    env: checkout.env,
+    label,
+    timeoutMs: 20_000,
+    echo: false,
+  });
+  const inspections = JSON.parse(result.stdout);
+  assert.equal(inspections.length, references.length, `${label}: inspection count changed.`);
+  return inspections;
+}
+
+async function inspectProjectResources(checkout) {
+  const references = await projectResourceReferences(
+    checkout,
+    `${checkout.label}:cleanup-snapshot`,
+  );
+  const [containers, volumes, networks] = await settleAll(
+    [
+      inspectResourceGroup(
+        'container',
+        references.containers,
+        checkout,
+        `${checkout.label}:cleanup-containers`,
+      ),
+      inspectResourceGroup(
+        'volume',
+        references.volumes,
+        checkout,
+        `${checkout.label}:cleanup-volumes`,
+      ),
+      inspectResourceGroup(
+        'network',
+        references.networks,
+        checkout,
+        `${checkout.label}:cleanup-networks`,
+      ),
+    ],
+    `${checkout.label} Compose ownership inspection`,
+  );
+  return { references, containers, volumes, networks };
+}
+
+export function composeCleanupEligible(checkout) {
+  return Boolean(
+    checkout.cleanup?.prestateEmpty &&
+    (checkout.cleanup.goAttempted || checkout.cleanup.owned !== null),
+  );
+}
+
+export function assertComposeCleanupOwnership(checkout, resources) {
+  assert.equal(
+    composeCleanupEligible(checkout),
+    true,
+    `Refusing Compose cleanup for ${checkout.label}: no empty prestate and owned go attempt.`,
+  );
+  const project = checkout.cleanup.project;
+  for (const resource of [...resources.containers, ...resources.volumes, ...resources.networks]) {
+    assert.equal(
+      resource.Labels?.['com.docker.compose.project'] ??
+        resource.Config?.Labels?.['com.docker.compose.project'],
+      project,
+      `Refusing Compose cleanup for ${checkout.label}: resource ownership label changed.`,
+    );
+  }
+  for (const container of resources.containers) {
+    assert.equal(
+      container.Config?.Labels?.['com.docker.compose.project.working_dir'],
+      checkout.root,
+      `Refusing Compose cleanup for ${checkout.label}: container working directory changed.`,
+    );
+  }
+
+  const owned = checkout.cleanup.owned;
+  if (owned) {
+    assert.equal(
+      resources.containers.some((container) => container.Id === owned.containerId),
+      true,
+      `Refusing Compose cleanup for ${checkout.label}: owned container identity changed.`,
+    );
+    for (const volume of owned.volumes) {
+      assert.equal(
+        resources.volumes.some((inspection) => inspection.Name === volume),
+        true,
+        `Refusing Compose cleanup for ${checkout.label}: owned volume identity changed.`,
+      );
+    }
+  }
 }
 
 async function installClone(checkout) {
@@ -415,6 +596,12 @@ function assertChildStillRunning(checkout) {
 }
 
 async function startCheckout(checkout) {
+  assert.equal(
+    checkout.cleanup.prestateEmpty,
+    true,
+    `${checkout.label} Compose prestate was not verified empty.`,
+  );
+  checkout.cleanup.goAttempted = true;
   checkout.go = startLogged(pnpm, ['go'], {
     cwd: checkout.root,
     env: checkout.env,
@@ -423,6 +610,7 @@ async function startCheckout(checkout) {
   await settleAll([verifyApi(checkout), verifyWeb(checkout)], `${checkout.label} readiness`);
   assertChildStillRunning(checkout);
   checkout.compose = await inspectCheckoutCompose(checkout);
+  checkout.cleanup.owned = checkout.compose;
 }
 
 async function fetchBounded(url) {
@@ -655,7 +843,25 @@ async function cleanupCheckout(checkout, errors) {
       }
     }
   }
+  if (!composeCleanupEligible(checkout)) {
+    process.stdout.write(
+      `[${checkout.label}] skipping Compose cleanup: no eligible owned go attempt.\n`,
+    );
+    return;
+  }
   try {
+    const resources = await inspectProjectResources(checkout);
+    assertComposeCleanupOwnership(checkout, resources);
+    if (resourceReferenceCount(resources.references) === 0) return;
+    const confirmed = await projectResourceReferences(
+      checkout,
+      `${checkout.label}:cleanup-confirm`,
+    );
+    assert.deepEqual(
+      confirmed,
+      resources.references,
+      `Refusing Compose cleanup for ${checkout.label}: project resources changed during ownership validation.`,
+    );
     await runBounded(
       'docker',
       [
@@ -673,8 +879,22 @@ async function cleanupCheckout(checkout, errors) {
         timeoutMs: COMMAND_TIMEOUT_MS,
       },
     );
+    const remaining = await projectResourceReferences(
+      checkout,
+      `${checkout.label}:cleanup-poststate`,
+    );
+    assert.equal(
+      resourceReferenceCount(remaining),
+      0,
+      `${checkout.label} Compose cleanup left owned resources behind: ${JSON.stringify(remaining)}.`,
+    );
   } catch (error) {
-    errors.push(error);
+    const refusal = new Error(
+      `${checkout.label} Compose cleanup refused after ownership diagnostics: ${error.message}`,
+      { cause: error },
+    );
+    process.stderr.write(`[${checkout.label}:cleanup-refused] ${refusal.message}\n`);
+    errors.push(refusal);
   }
 }
 
@@ -743,6 +963,12 @@ export async function main() {
       'clean clone creation',
     );
     checkouts.push(first, second);
+    assert.notEqual(
+      first.cleanup.project,
+      second.cleanup.project,
+      'Temporary checkouts must have distinct Compose project identities.',
+    );
+    await settleAll(checkouts.map(prepareComposeCleanup), 'Compose project prestate checks');
     await settleAll(checkouts.map(installClone), 'clean clone installation');
 
     await hello(first);
@@ -761,9 +987,20 @@ export async function main() {
       'clone A post-stop verification',
     );
     first.compose = await inspectCheckoutCompose(first);
+    first.cleanup.owned = first.compose;
 
     const finalRogueLogs = await readRogueLogs(rogue, env, false);
-    const rogueResult = assertRogueSilent(rogue.baseline, finalRogueLogs);
+    const finalRogueInspection = await inspectContainer(
+      rogue.containerId,
+      env,
+      'rogue:final-inspect',
+    );
+    const rogueResult = assertRogueProof(
+      rogue,
+      finalRogueInspection,
+      rogue.baseline,
+      finalRogueLogs,
+    );
     process.stdout.write(
       `[rogue] post-baseline connections=${rogueResult.connectionCount}, statements=${rogueResult.statementCount}, application-table mentions=${rogueResult.applicationTableCount}.\n`,
     );

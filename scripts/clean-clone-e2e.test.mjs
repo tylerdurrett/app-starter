@@ -3,8 +3,12 @@ import { describe, it } from 'node:test';
 
 import {
   analyzeRogueLogSuffix,
+  assertComposeCleanupOwnership,
   assertDistinctResources,
+  assertEmptyComposePrestate,
+  assertRogueProof,
   assertRogueSilent,
+  composeCleanupEligible,
   logSuffix,
   readConfigSource,
   runBounded,
@@ -54,6 +58,39 @@ describe('clean-clone E2E assertions', () => {
     );
   });
 
+  it('rejects shutdown-only rogue logs when the exact listener is no longer running', () => {
+    const rogue = {
+      containerId: 'rogue-id',
+      name: 'rogue-name',
+      runId: 'rogue-run',
+    };
+    const inspection = {
+      Id: rogue.containerId,
+      Name: `/${rogue.name}`,
+      Config: { Labels: { 'app-starter.clean-clone-e2e': rogue.runId } },
+      State: { Running: false, Status: 'exited' },
+      HostConfig: {
+        PortBindings: {
+          '5432/tcp': [5100, 5150, 5200].map((port) => ({
+            HostIp: '127.0.0.1',
+            HostPort: String(port),
+          })),
+        },
+      },
+    };
+
+    assert.throws(
+      () =>
+        assertRogueProof(
+          rogue,
+          inspection,
+          'ready\n',
+          'ready\nreceived fast shutdown request\ndatabase system is shut down\n',
+        ),
+      /must still be running/,
+    );
+  });
+
   it('bounds child commands and stops only the process group it spawned', async () => {
     await assert.rejects(
       runBounded(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
@@ -82,6 +119,112 @@ describe('clean-clone E2E assertions', () => {
     assert.throws(
       () => assertDistinctResources(first, { ...second, volumes: first.volumes }),
       /volume names must differ/,
+    );
+  });
+
+  it('requires an empty Compose prestate before cleanup becomes eligible', () => {
+    const empty = { containers: [], volumes: [], networks: [] };
+    assert.doesNotThrow(() => assertEmptyComposePrestate(empty, 'app-starter-clean'));
+    assert.throws(
+      () =>
+        assertEmptyComposePrestate(
+          { ...empty, containers: ['preexisting-container'] },
+          'app-starter-collision',
+        ),
+      /Compose resources already exist/,
+    );
+    assert.equal(
+      composeCleanupEligible({
+        cleanup: { prestateEmpty: false, goAttempted: true, owned: null },
+      }),
+      false,
+    );
+  });
+
+  it('permits partial-go cleanup only for resources with the checkout ownership labels', () => {
+    const checkout = {
+      label: 'clone-a',
+      root: '/tmp/clone-a',
+      cleanup: {
+        project: 'app-starter-clone-a',
+        prestateEmpty: true,
+        goAttempted: true,
+        owned: null,
+      },
+    };
+    const resources = {
+      containers: [
+        {
+          Id: 'partial-container',
+          Config: {
+            Labels: {
+              'com.docker.compose.project': checkout.cleanup.project,
+              'com.docker.compose.project.working_dir': checkout.root,
+            },
+          },
+        },
+      ],
+      volumes: [
+        {
+          Name: 'partial-volume',
+          Labels: { 'com.docker.compose.project': checkout.cleanup.project },
+        },
+      ],
+      networks: [
+        {
+          Id: 'partial-network',
+          Labels: { 'com.docker.compose.project': checkout.cleanup.project },
+        },
+      ],
+    };
+
+    assert.doesNotThrow(() => assertComposeCleanupOwnership(checkout, resources));
+    assert.throws(
+      () =>
+        assertComposeCleanupOwnership(checkout, {
+          ...resources,
+          networks: [
+            {
+              Id: 'collision',
+              Labels: { 'com.docker.compose.project': 'somebody-elses-project' },
+            },
+          ],
+        }),
+      /ownership label changed/,
+    );
+  });
+
+  it('revalidates positively observed Compose container and volume identities', () => {
+    const checkout = {
+      label: 'clone-a',
+      root: '/tmp/clone-a',
+      cleanup: {
+        project: 'app-starter-clone-a',
+        prestateEmpty: true,
+        goAttempted: true,
+        owned: { containerId: 'owned-container', volumes: ['owned-volume'] },
+      },
+    };
+    const labels = { 'com.docker.compose.project': checkout.cleanup.project };
+    const resources = {
+      containers: [
+        {
+          Id: 'replacement-container',
+          Config: {
+            Labels: {
+              ...labels,
+              'com.docker.compose.project.working_dir': checkout.root,
+            },
+          },
+        },
+      ],
+      volumes: [{ Name: 'owned-volume', Labels: labels }],
+      networks: [],
+    };
+
+    assert.throws(
+      () => assertComposeCleanupOwnership(checkout, resources),
+      /owned container identity changed/,
     );
   });
 });
