@@ -11,6 +11,7 @@ import {
   buildComposeCommand,
   canonicalCheckoutRoot,
   composeProjectName,
+  main,
   runCompose,
 } from './compose.mjs';
 
@@ -85,6 +86,33 @@ describe('Compose commands', () => {
         options: { cwd: canonicalCheckoutRoot(first), env, stdio: 'ignore' },
       },
     ]);
+  });
+
+  it('refuses a managed database reset in explicit external mode before Docker runs', async () => {
+    let composeCalls = 0;
+
+    await assert.rejects(
+      main(['--require-compose-database', 'down', '-v'], {
+        resolveDatabase: () => ({ mode: 'external' }),
+        runComposeCommand: async () => {
+          composeCalls += 1;
+        },
+      }),
+      /Refusing to reset.*DATABASE_MODE=external/,
+    );
+
+    assert.equal(composeCalls, 0);
+  });
+
+  it('allows a managed database reset in Compose mode', async () => {
+    const calls = [];
+
+    await main(['--require-compose-database', 'down', '-v'], {
+      resolveDatabase: () => ({ mode: 'compose' }),
+      runComposeCommand: async (args) => calls.push(args),
+    });
+
+    assert.deepEqual(calls, [['down', '-v']]);
   });
 });
 

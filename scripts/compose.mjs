@@ -6,6 +6,8 @@ import { realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { resolveDatabaseEnvironment } from './database-env.mjs';
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const HASH_LENGTH = 12;
 
@@ -61,8 +63,18 @@ export function runCompose(
   });
 }
 
-export async function main(args = process.argv.slice(2)) {
-  await runCompose(args);
+export async function main(
+  args = process.argv.slice(2),
+  { resolveDatabase = resolveDatabaseEnvironment, runComposeCommand = runCompose } = {},
+) {
+  const requireComposeDatabase = args[0] === '--require-compose-database';
+  const composeArgs = requireComposeDatabase ? args.slice(1) : args;
+
+  if (requireComposeDatabase && resolveDatabase().mode !== 'compose') {
+    throw new Error('Refusing to reset the managed database while DATABASE_MODE=external.');
+  }
+
+  await runComposeCommand(composeArgs);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
