@@ -9,6 +9,8 @@ import {
   readFileSync,
   statSync,
   symlinkSync,
+  unlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
@@ -64,6 +66,16 @@ async function closeServer(server) {
   await new Promise((resolvePromise, reject) => {
     server.close((error) => (error ? reject(error) : resolvePromise()));
   });
+}
+
+async function rawControlRequest(socketPath, request) {
+  const client = createConnection(socketPath);
+  let response = '';
+  client.on('data', (chunk) => (response += chunk));
+  await once(client, 'connect');
+  client.end(request);
+  await once(client, 'close');
+  return JSON.parse(response.trim());
 }
 
 describe('checkout control identity', { skip: unixOnly }, () => {
@@ -124,6 +136,24 @@ describe('safe control state handling', { skip: unixOnly }, () => {
     assert.equal(existsSync(paths.socketPath), false);
   });
 
+  it('reclaims a crashed supervisor lock only after it is stale and has no listener', async () => {
+    const { checkoutRoot, runtimeRoot } = temporaryCheckout();
+    const paths = controlPaths(checkoutRoot, runtimeRoot);
+    mkdirSync(paths.lockDirectory, { recursive: true });
+    writeFileSync(join(paths.lockDirectory, 'owner'), `${'a'.repeat(64)}\n`, { mode: 0o600 });
+    writeFileSync(paths.tokenPath, `${'b'.repeat(64)}\n`, { mode: 0o600 });
+    writeFileSync(paths.socketPath, 'stale socket placeholder');
+    const old = new Date(Date.now() - 10_000);
+    utimesSync(paths.lockDirectory, old, old);
+
+    const result = await inspectControl(paths);
+
+    assert.equal(result.listener, false);
+    assert.equal(existsSync(paths.lockDirectory), false);
+    assert.equal(existsSync(paths.tokenPath), false);
+    assert.equal(existsSync(paths.socketPath), false);
+  });
+
   it('publishes random authentication state and socket permissions as owner-only', async () => {
     const { checkoutRoot, runtimeRoot } = temporaryCheckout();
     const paths = controlPaths(checkoutRoot, runtimeRoot);
@@ -165,6 +195,60 @@ describe('safe control state handling', { skip: unixOnly }, () => {
       preflight({ checkoutRoot, runtimeRoot, checkPort: async () => true }),
       /already managed/,
     );
+    assert.equal((await queryControl(paths, 'status')).authenticated, true);
+
+    await channel.close();
+  });
+
+  it('allows only one channel acquisition under concurrent startup', async () => {
+    const { checkoutRoot, runtimeRoot } = temporaryCheckout();
+    const paths = controlPaths(checkoutRoot, runtimeRoot);
+
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 20 }, async () => {
+        await preflight({ checkoutRoot, runtimeRoot, checkPort: async () => true });
+        return createControlChannel(paths, () => {});
+      }),
+    );
+    const channels = attempts
+      .filter((attempt) => attempt.status === 'fulfilled')
+      .map((attempt) => attempt.value);
+
+    assert.equal(channels.length, 1);
+    assert.equal((await queryControl(paths, 'status')).authenticated, true);
+    assert.equal(attempts.filter((attempt) => attempt.status === 'rejected').length, 19);
+
+    await channels[0].close();
+  });
+
+  it('does not unlink a replacement listener it does not own during cleanup', async () => {
+    const { checkoutRoot, runtimeRoot } = temporaryCheckout();
+    const paths = controlPaths(checkoutRoot, runtimeRoot);
+    const channel = await createControlChannel(paths, () => {});
+    unlinkSync(paths.socketPath);
+    const replacement = createServer((socket) => socket.end('replacement'));
+    await listen(replacement, paths.socketPath);
+
+    await channel.close();
+
+    assert.equal(existsSync(paths.socketPath), true);
+    const client = createConnection(paths.socketPath);
+    let response = '';
+    client.on('data', (chunk) => (response += chunk));
+    await once(client, 'close');
+    assert.equal(response, 'replacement');
+    await closeServer(replacement);
+  });
+
+  it('contains malformed unauthenticated requests and keeps serving', async () => {
+    const { checkoutRoot, runtimeRoot } = temporaryCheckout();
+    const paths = controlPaths(checkoutRoot, runtimeRoot);
+    const channel = await createControlChannel(paths, () => {});
+
+    assert.deepEqual(await rawControlRequest(paths.socketPath, 'null\n'), {
+      ok: false,
+      error: 'invalid request',
+    });
     assert.equal((await queryControl(paths, 'status')).authenticated, true);
 
     await channel.close();
@@ -239,6 +323,7 @@ describe('owned process-group supervision', { skip: unixOnly, concurrency: false
         signals.push([pid, signal]);
         queueMicrotask(() => child.emit('close', 0, null));
       },
+      groupExists: () => false,
     });
     const paths = controlPaths(checkoutRoot, runtimeRoot);
     await waitUntil(() => existsSync(paths.tokenPath));
@@ -267,6 +352,7 @@ describe('owned process-group supervision', { skip: unixOnly, concurrency: false
           signals.push([pid, forwardedSignal]);
           queueMicrotask(() => child.emit('close', null, forwardedSignal));
         },
+        groupExists: () => false,
       });
       await waitUntil(() => existsSync(controlPaths(checkoutRoot, runtimeRoot).tokenPath));
 
@@ -281,6 +367,7 @@ describe('owned process-group supervision', { skip: unixOnly, concurrency: false
     const { checkoutRoot, runtimeRoot } = temporaryCheckout();
     const child = mockChild(73_424);
     const signals = [];
+    let groupAlive = true;
     const running = startSupervised('turbo', [], {
       checkoutRoot,
       runtimeRoot,
@@ -290,8 +377,12 @@ describe('owned process-group supervision', { skip: unixOnly, concurrency: false
       spawnCommand: () => child,
       killProcess(pid, signal) {
         signals.push([pid, signal]);
-        if (signal === 'SIGKILL') queueMicrotask(() => child.emit('close', null, signal));
+        if (signal === 'SIGKILL') {
+          groupAlive = false;
+          queueMicrotask(() => child.emit('close', null, signal));
+        }
       },
+      groupExists: () => groupAlive,
     });
     await waitUntil(() => existsSync(controlPaths(checkoutRoot, runtimeRoot).tokenPath));
 
@@ -303,10 +394,55 @@ describe('owned process-group supervision', { skip: unixOnly, concurrency: false
     ]);
   });
 
+  it('keeps state and escalates when the leader exits but a descendant ignores TERM', async () => {
+    const { checkoutRoot, runtimeRoot } = temporaryCheckout();
+    const paths = controlPaths(checkoutRoot, runtimeRoot);
+    const child = mockChild(73_425);
+    const signals = [];
+    let groupAlive = true;
+    let killDelivered = false;
+    const running = startSupervised('turbo', [], {
+      checkoutRoot,
+      runtimeRoot,
+      checkPort: async () => true,
+      installSignalHandlers: false,
+      terminationGraceMs: 30,
+      spawnCommand: () => child,
+      killProcess(pid, signal) {
+        signals.push([pid, signal]);
+        if (signal === 'SIGTERM') queueMicrotask(() => child.emit('close', null, signal));
+        if (signal === 'SIGKILL') {
+          groupAlive = false;
+          killDelivered = true;
+        }
+      },
+      groupExists: () => {
+        if (killDelivered) {
+          const error = new Error('orphaned group is being reaped');
+          error.code = 'EPERM';
+          throw error;
+        }
+        return groupAlive;
+      },
+    });
+    await waitUntil(() => existsSync(paths.tokenPath));
+
+    await stopSupervised({ checkoutRoot, runtimeRoot });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    assert.equal(existsSync(paths.tokenPath), true);
+
+    assert.deepEqual(await running, { code: null, signal: 'SIGTERM' });
+    assert.deepEqual(signals, [
+      [-child.pid, 'SIGTERM'],
+      [-child.pid, 'SIGKILL'],
+    ]);
+    assert.equal(existsSync(paths.tokenPath), false);
+  });
+
   it('cleans control state when spawn fails or the child exits with an error', async () => {
     const { checkoutRoot, runtimeRoot } = temporaryCheckout();
     const paths = controlPaths(checkoutRoot, runtimeRoot);
-    const spawnErrorChild = mockChild(73_425);
+    const spawnErrorChild = mockChild(73_426);
     const spawnFailure = startSupervised('missing-command', [], {
       checkoutRoot,
       runtimeRoot,
@@ -321,7 +457,7 @@ describe('owned process-group supervision', { skip: unixOnly, concurrency: false
     assert.equal(existsSync(paths.tokenPath), false);
     assert.equal(existsSync(paths.socketPath), false);
 
-    const failedChild = mockChild(73_426);
+    const failedChild = mockChild(73_427);
     const failedRun = startSupervised('turbo', [], {
       checkoutRoot,
       runtimeRoot,

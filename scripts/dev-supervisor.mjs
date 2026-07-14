@@ -10,7 +10,13 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { createServer, createConnection } from 'node:net';
@@ -28,6 +34,8 @@ const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const MAX_REQUEST_BYTES = 4_096;
 const DEFAULT_TERMINATION_GRACE_MS = 5_000;
 const MAX_UNIX_SOCKET_PATH_BYTES = 100;
+const LOCK_STALE_MS = 2_000;
+const GROUP_EXIT_POLL_MS = 10;
 
 function ignoreMissing(path) {
   try {
@@ -55,6 +63,7 @@ export function controlPaths(checkoutRoot = scriptRoot, runtimeRoot = CONTROL_RO
     canonicalRoot,
     checkoutHash,
     controlDirectory,
+    lockDirectory: join(controlDirectory, 'owner.lock'),
     socketPath,
     tokenPath: join(controlDirectory, 'token'),
   };
@@ -100,6 +109,132 @@ function writeControlToken(tokenPath, token) {
     if (fd !== undefined) closeSync(fd);
     ignoreMissing(temporaryPath);
   }
+}
+
+function sameFile(path, identity) {
+  if (!identity) return false;
+  try {
+    const stat = lstatSync(path);
+    const linkTarget = stat.isSymbolicLink() ? readlinkSync(path) : null;
+    return (
+      stat.dev === identity.dev &&
+      stat.ino === identity.ino &&
+      stat.mode === identity.mode &&
+      stat.ctimeMs === identity.ctimeMs &&
+      linkTarget === identity.linkTarget
+    );
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function fileIdentity(path) {
+  const stat = lstatSync(path);
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    mode: stat.mode,
+    ctimeMs: stat.ctimeMs,
+    linkTarget: stat.isSymbolicLink() ? readlinkSync(path) : null,
+  };
+}
+
+function existingFileIdentity(path) {
+  try {
+    return fileIdentity(path);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function socketLinkOwned(paths, ownedSocketPath) {
+  try {
+    return (
+      lstatSync(paths.socketPath).isSymbolicLink() &&
+      readlinkSync(paths.socketPath) === ownedSocketPath
+    );
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'EINVAL') return false;
+    throw error;
+  }
+}
+
+function ownedSocketPath(paths, owner) {
+  const candidate = join(paths.controlDirectory, `socket-${owner.slice(0, 12)}.sock`);
+  if (Buffer.byteLength(candidate) < MAX_UNIX_SOCKET_PATH_BYTES) return candidate;
+  const addressHash = createHash('sha256').update(paths.socketPath).digest('hex').slice(0, 10);
+  return join(
+    CONTROL_ROOT,
+    `as-own-${paths.checkoutHash}-${addressHash}-${owner.slice(0, 8)}.sock`,
+  );
+}
+
+function readLockOwner(paths) {
+  try {
+    return readFileSync(join(paths.lockDirectory, 'owner'), 'utf8').trim();
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
+    throw error;
+  }
+}
+
+function lockIsStale(paths, now = Date.now()) {
+  try {
+    return now - statSync(paths.lockDirectory).mtimeMs >= LOCK_STALE_MS;
+  } catch (error) {
+    if (error.code === 'ENOENT') return true;
+    throw error;
+  }
+}
+
+function removeStaleLock(paths) {
+  const quarantine = `${paths.lockDirectory}.stale-${randomBytes(8).toString('hex')}`;
+  try {
+    renameSync(paths.lockDirectory, quarantine);
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+  rmSync(quarantine, { recursive: true, force: true });
+  return true;
+}
+
+function tryAcquireControlLock(paths, { reclaimStale = false } = {}) {
+  ensureControlDirectory(paths);
+  const owner = randomBytes(TOKEN_BYTES).toString('hex');
+  for (;;) {
+    try {
+      mkdirSync(paths.lockDirectory, { mode: 0o700 });
+      writeFileSync(join(paths.lockDirectory, 'owner'), `${owner}\n`, {
+        flag: 'wx',
+        mode: 0o600,
+      });
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      if (!reclaimStale || !lockIsStale(paths) || !removeStaleLock(paths)) return null;
+    }
+  }
+
+  const ownsLock = () => readLockOwner(paths) === owner;
+  return {
+    owner,
+    ownsLock,
+    refresh() {
+      if (!ownsLock()) throw new Error('Checkout control ownership was lost.');
+      const now = new Date();
+      utimesSync(paths.lockDirectory, now, now);
+    },
+    release() {
+      if (!ownsLock()) return;
+      // Refreshing prevents a stale-lock reclaimer racing this short removal.
+      const now = new Date();
+      utimesSync(paths.lockDirectory, now, now);
+      rmSync(paths.lockDirectory, { recursive: true });
+    },
+  };
 }
 
 function tokensMatch(actual, expected) {
@@ -183,13 +318,28 @@ export function queryControl(paths, command, { timeoutMs = CONTROL_TIMEOUT_MS } 
 }
 
 export async function inspectControl(paths, command = 'status', options) {
-  const result = await queryControl(paths, command, options);
-  if (!result.listener) {
-    // Token and socket files only become stale once no process is listening.
-    ignoreMissing(paths.tokenPath);
-    ignoreMissing(paths.socketPath);
+  let result = await queryControl(paths, command, options);
+  if (result.listener) return result;
+
+  let lock = tryAcquireControlLock(paths);
+  if (!lock && lockIsStale(paths)) {
+    lock = tryAcquireControlLock(paths, { reclaimStale: true });
   }
-  return result;
+  if (!lock) return result;
+  try {
+    // The second probe closes the query→unlink race: a compliant startup must
+    // own this same lock before it can bind the socket.
+    const tokenIdentity = existingFileIdentity(paths.tokenPath);
+    const socketIdentity = existingFileIdentity(paths.socketPath);
+    result = await queryControl(paths, command, options);
+    if (!result.listener) {
+      if (sameFile(paths.tokenPath, tokenIdentity)) ignoreMissing(paths.tokenPath);
+      if (sameFile(paths.socketPath, socketIdentity)) ignoreMissing(paths.socketPath);
+    }
+    return result;
+  } finally {
+    lock.release();
+  }
 }
 
 function assertNoActiveSupervisor(result) {
@@ -259,62 +409,98 @@ function listen(server, socketPath) {
 }
 
 export async function createControlChannel(paths, onStop) {
-  ensureControlDirectory(paths);
+  const lock = tryAcquireControlLock(paths);
+  if (!lock) {
+    const control = await inspectControl(paths);
+    assertNoActiveSupervisor(control);
+    throw new Error('Development services are already starting for this checkout.');
+  }
+  // This lock excludes both other starts and preflight stale cleanup.
+  const existingTokenIdentity = existingFileIdentity(paths.tokenPath);
+  const existingSocketIdentity = existingFileIdentity(paths.socketPath);
+  try {
+    const existingControl = await queryControl(paths, 'status');
+    assertNoActiveSupervisor(existingControl);
+  } catch (error) {
+    lock.release();
+    throw error;
+  }
+  if (sameFile(paths.tokenPath, existingTokenIdentity)) ignoreMissing(paths.tokenPath);
+  if (sameFile(paths.socketPath, existingSocketIdentity)) ignoreMissing(paths.socketPath);
   const token = randomBytes(TOKEN_BYTES).toString('hex');
+  const ownedSocket = ownedSocketPath(paths, lock.owner);
   const connections = new Set();
   let socketOwned = false;
   let tokenPublished = false;
+  let tokenIdentity;
   const server = createServer((socket) => {
     connections.add(socket);
     socket.once('close', () => connections.delete(socket));
     let request = '';
     socket.on('data', (chunk) => {
-      request += chunk;
-      if (request.length > MAX_REQUEST_BYTES) {
-        socket.end(`${JSON.stringify({ ok: false, error: 'request too large' })}\n`);
-        return;
-      }
-      const newline = request.indexOf('\n');
-      if (newline === -1) return;
-      socket.removeAllListeners('data');
-
-      let parsed;
       try {
-        parsed = JSON.parse(request.slice(0, newline));
+        request += chunk;
+        if (request.length > MAX_REQUEST_BYTES) {
+          socket.removeAllListeners('data');
+          socket.end(`${JSON.stringify({ ok: false, error: 'request too large' })}\n`);
+          return;
+        }
+        const newline = request.indexOf('\n');
+        if (newline === -1) return;
+        socket.removeAllListeners('data');
+
+        const parsed = JSON.parse(request.slice(0, newline));
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('invalid request');
+        }
+        if (!tokensMatch(parsed.token, token)) {
+          socket.end(`${JSON.stringify({ ok: false, error: 'authentication failed' })}\n`);
+          return;
+        }
+        if (parsed.command === 'status') {
+          socket.end(`${JSON.stringify({ ok: true, status: 'running' })}\n`);
+          return;
+        }
+        if (parsed.command === 'stop') {
+          socket.end(`${JSON.stringify({ ok: true, status: 'stopping' })}\n`, () => {
+            try {
+              onStop();
+            } catch (error) {
+              console.error(error);
+            }
+          });
+          return;
+        }
+        socket.end(`${JSON.stringify({ ok: false, error: 'unknown command' })}\n`);
       } catch {
-        socket.end(`${JSON.stringify({ ok: false, error: 'invalid request' })}\n`);
-        return;
+        if (!socket.destroyed) {
+          socket.end(`${JSON.stringify({ ok: false, error: 'invalid request' })}\n`);
+        }
       }
-      if (!tokensMatch(parsed.token, token)) {
-        socket.end(`${JSON.stringify({ ok: false, error: 'authentication failed' })}\n`);
-        return;
-      }
-      if (parsed.command === 'status') {
-        socket.end(`${JSON.stringify({ ok: true, status: 'running' })}\n`);
-        return;
-      }
-      if (parsed.command === 'stop') {
-        socket.end(`${JSON.stringify({ ok: true, status: 'stopping' })}\n`, () => onStop());
-        return;
-      }
-      socket.end(`${JSON.stringify({ ok: false, error: 'unknown command' })}\n`);
     });
   });
 
   try {
-    await listen(server, paths.socketPath);
+    if (!lock.ownsLock()) throw new Error('Checkout control ownership was lost.');
+    await listen(server, ownedSocket);
     socketOwned = true;
-    chmodSync(paths.socketPath, 0o600);
+    chmodSync(ownedSocket, 0o600);
+    symlinkSync(ownedSocket, paths.socketPath);
+    if (!lock.ownsLock()) throw new Error('Checkout control ownership was lost.');
     writeControlToken(paths.tokenPath, token);
     tokenPublished = true;
+    tokenIdentity = fileIdentity(paths.tokenPath);
+    lock.refresh();
   } catch (error) {
     if (socketOwned) {
       await new Promise((resolvePromise) => server.close(() => resolvePromise()));
-      ignoreMissing(paths.socketPath);
+      if (socketLinkOwned(paths, ownedSocket)) ignoreMissing(paths.socketPath);
+      ignoreMissing(ownedSocket);
     }
     // Never unlink state we did not publish: it may belong to a live listener
     // that won the control-address race.
-    if (tokenPublished) ignoreMissing(paths.tokenPath);
+    if (tokenPublished && sameFile(paths.tokenPath, tokenIdentity)) ignoreMissing(paths.tokenPath);
+    lock.release();
     throw error;
   }
 
@@ -324,10 +510,13 @@ export async function createControlChannel(paths, onStop) {
     async close() {
       if (closed) return;
       closed = true;
+      lock.refresh();
       for (const socket of connections) socket.destroy();
       await new Promise((resolvePromise) => server.close(() => resolvePromise()));
-      ignoreMissing(paths.tokenPath);
-      ignoreMissing(paths.socketPath);
+      if (sameFile(paths.tokenPath, tokenIdentity)) ignoreMissing(paths.tokenPath);
+      if (socketLinkOwned(paths, ownedSocket)) ignoreMissing(paths.socketPath);
+      ignoreMissing(ownedSocket);
+      lock.release();
     },
   };
 }
@@ -341,6 +530,17 @@ function signalProcessGroup(child, signal, killProcess = process.kill) {
   }
 }
 
+function processGroupExists(child, killProcess = process.kill) {
+  if (!child?.pid) return false;
+  try {
+    killProcess(-child.pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
 /** Start and exclusively supervise one detached child process group. */
 export async function startSupervised(
   command,
@@ -351,6 +551,7 @@ export async function startSupervised(
     checkPort,
     spawnCommand = spawn,
     killProcess = process.kill,
+    groupExists = (ownedChild) => processGroupExists(ownedChild, killProcess),
     terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
     env = process.env,
     stdio = 'inherit',
@@ -364,17 +565,82 @@ export async function startSupervised(
   const paths = await preflight({ checkoutRoot, runtimeRoot, checkPort });
   let child;
   let escalationTimer;
+  let groupPollTimer;
   let shutdownStarted = false;
+  let shutdownForwarded = false;
+  let shutdownSignal = 'SIGTERM';
+  let killDelivered = false;
+  let childResult;
+  let settleRun;
+  let failRun;
+
+  const clearGroupTimers = () => {
+    clearTimeout(escalationTimer);
+    clearTimeout(groupPollTimer);
+  };
+
+  const finishWhenGroupExits = (deadline) => {
+    let alive;
+    try {
+      alive = groupExists(child);
+    } catch (error) {
+      // macOS can report EPERM for a just-killed orphaned group while its
+      // unsignalable zombie is being reaped. A successful group SIGKILL has
+      // already ended every process the supervisor can own in that case.
+      if (killDelivered && error.code === 'EPERM') alive = false;
+      else {
+        failRun?.(error);
+        return;
+      }
+    }
+    if (!alive) {
+      if (childResult) {
+        clearGroupTimers();
+        settleRun?.(childResult);
+        return;
+      }
+    }
+    if (Date.now() >= deadline) {
+      failRun?.(
+        new Error(
+          alive
+            ? 'Owned development process group survived SIGKILL.'
+            : 'Owned development process did not report its exit after SIGKILL.',
+        ),
+      );
+      return;
+    }
+    groupPollTimer = setTimeout(() => finishWhenGroupExits(deadline), GROUP_EXIT_POLL_MS);
+  };
+
+  const escalate = () => {
+    try {
+      if (groupExists(child)) {
+        signalProcessGroup(child, 'SIGKILL', killProcess);
+        killDelivered = true;
+      }
+      finishWhenGroupExits(Date.now() + terminationGraceMs);
+    } catch (error) {
+      failRun?.(error);
+    }
+  };
+
+  const forwardShutdown = () => {
+    if (shutdownForwarded || !child) return;
+    shutdownForwarded = true;
+    try {
+      signalProcessGroup(child, shutdownSignal, killProcess);
+      escalationTimer = setTimeout(escalate, terminationGraceMs);
+    } catch (error) {
+      failRun?.(error);
+    }
+  };
 
   const beginShutdown = (signal = 'SIGTERM') => {
     if (shutdownStarted) return;
     shutdownStarted = true;
-    signalProcessGroup(child, signal, killProcess);
-    escalationTimer = setTimeout(
-      () => signalProcessGroup(child, 'SIGKILL', killProcess),
-      terminationGraceMs,
-    );
-    escalationTimer.unref?.();
+    shutdownSignal = signal;
+    forwardShutdown();
   };
 
   const channel = await createControlChannel(paths, () => beginShutdown('SIGTERM'));
@@ -395,19 +661,36 @@ export async function startSupervised(
 
     return await new Promise((resolvePromise, reject) => {
       let settled = false;
-      child.once('error', (error) => {
+      settleRun = (result) => {
+        if (settled) return;
+        settled = true;
+        resolvePromise(result);
+      };
+      failRun = (error) => {
         if (settled) return;
         settled = true;
         reject(error);
+      };
+      child.once('error', (error) => {
+        failRun(error);
       });
       child.once('close', (code, signal) => {
         if (settled) return;
-        settled = true;
-        resolvePromise({ code, signal });
+        childResult = { code, signal };
+        if (!shutdownStarted) beginShutdown('SIGTERM');
+        try {
+          if (!groupExists(child)) {
+            clearGroupTimers();
+            settleRun(childResult);
+          }
+        } catch (error) {
+          failRun(error);
+        }
       });
+      if (shutdownStarted) forwardShutdown();
     });
   } finally {
-    clearTimeout(escalationTimer);
+    clearGroupTimers();
     if (installSignalHandlers) {
       process.off('SIGINT', onSigint);
       process.off('SIGTERM', onSigterm);
