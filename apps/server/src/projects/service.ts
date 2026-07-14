@@ -19,7 +19,7 @@ import {
 
 export { ServiceError };
 
-/** Shared member-CRUD config for the project level (no owner guard). */
+/** Shared member-CRUD config for the project level. */
 const memberConfig: MemberCrudConfig<ProjectPermission> = {
   permissions: { list: 'project:members:list', remove: 'project:members:remove' },
   memberships: {
@@ -30,6 +30,14 @@ const memberConfig: MemberCrudConfig<ProjectPermission> = {
     entityId: projectMemberships.projectId,
   },
   selfRemovalError: { code: 'CONFLICT', message: 'You cannot remove yourself from the project' },
+  // Manager cannot remove the owner (relational rule, not covered by the
+  // permission matrix). Workspace owners/managers acting via the synthetic
+  // override present as 'owner' here, so the override path is unaffected.
+  ownerGuard(actorRole, targetRole) {
+    if (actorRole === 'manager' && targetRole === 'owner') {
+      throw new ServiceError('BAD_REQUEST', 'Manager cannot remove the project owner');
+    }
+  },
 };
 
 function resolveProjectMember(

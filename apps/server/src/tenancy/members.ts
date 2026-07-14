@@ -44,8 +44,8 @@ export interface MemberCrudConfig<Permission extends string> {
   selfRemovalError: { code: ServiceErrorCode; message: string };
   /**
    * DIVERGENT relational guard run after the target membership is fetched, with
-   * the actor's role and the target's role. Workspace forbids a manager
-   * removing the owner (BAD_REQUEST); project supplies none.
+   * the actor's role and the target's role. Both levels forbid a manager
+   * removing the owner (BAD_REQUEST), each with a level-specific message.
    */
   ownerGuard?: (actorRole: TenancyRole, targetRole: TenancyRole) => void;
 }
