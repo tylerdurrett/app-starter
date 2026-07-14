@@ -37,6 +37,7 @@ export const GLOBAL_RATE_LIMIT_MAX = 300;
 export const AUTH_RATE_LIMIT_MAX = 10;
 export const RATE_LIMIT_TIME_WINDOW = '1 minute';
 export const LOG_REDACTION_CENSOR = '[Redacted]';
+const INTERNAL_SERVER_ERROR_MESSAGE = 'Internal Server Error';
 
 const sensitiveLogFields = [
   'signingSecret',
@@ -190,7 +191,7 @@ function registerServerRoutes(app: FastifyInstance, opts?: BuildServerOpts) {
   app.register(mcpPlugin);
 
   // Map HttpError and ServiceError to structured JSON responses
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     if (error instanceof HttpError) {
       return reply.status(error.statusCode).send({ error: error.message });
     }
@@ -208,8 +209,13 @@ function registerServerRoutes(app: FastifyInstance, opts?: BuildServerOpts) {
     const statusCode = error instanceof Error && 'statusCode' in error
       ? (error as Error & { statusCode: number }).statusCode
       : 500;
-    const message = error instanceof Error ? error.message : 'Internal Server Error';
-    reply.status(statusCode).send({ error: message });
+    if (statusCode < 500) {
+      const message = error instanceof Error ? error.message : INTERNAL_SERVER_ERROR_MESSAGE;
+      return reply.status(statusCode).send({ error: message });
+    }
+
+    request.log.error({ err: error }, 'Unhandled request error');
+    return reply.status(statusCode).send({ error: INTERNAL_SERVER_ERROR_MESSAGE });
   });
 
   // Mount Better Auth routes
