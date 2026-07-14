@@ -1,6 +1,235 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { describe, it } from 'node:test';
-import { resolveManagedEnv } from './setup.mjs';
+import { findFreePort, isPortAvailable, PORT_PROBE_HOSTS } from './port-availability.mjs';
+import { askPort, resolveManagedEnv } from './setup.mjs';
+
+const execFileAsync = promisify(execFile);
+
+function listen(host = '127.0.0.1', port = 0) {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(port, host, () => resolve(server));
+  });
+}
+
+function close(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+function mockServerFactory(errorsByHost = {}) {
+  const listened = [];
+  const closed = [];
+
+  class MockServer extends EventEmitter {
+    unref() {}
+
+    listen({ host }, callback) {
+      listened.push(host);
+      queueMicrotask(() => {
+        const code = errorsByHost[host];
+        if (code) {
+          this.emit('error', Object.assign(new Error(`${host}: ${code}`), { code }));
+        } else {
+          callback();
+        }
+      });
+    }
+
+    close(callback) {
+      closed.push(listened.at(-1));
+      queueMicrotask(() => callback());
+    }
+  }
+
+  return { createServerFn: () => new MockServer(), listened, closed };
+}
+
+async function createSetupFixture() {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'app-starter-setup-')));
+  const scriptsDirectory = join(directory, 'scripts');
+  await mkdir(scriptsDirectory);
+  await Promise.all([
+    writeFile(join(directory, '.env'), ''),
+    readFile(new URL('./setup.mjs', import.meta.url)).then((contents) =>
+      writeFile(join(scriptsDirectory, 'setup.mjs'), contents),
+    ),
+    readFile(new URL('./port-availability.mjs', import.meta.url)).then((contents) =>
+      writeFile(join(scriptsDirectory, 'port-availability.mjs'), contents),
+    ),
+  ]);
+  return { directory, setupPath: join(scriptsDirectory, 'setup.mjs') };
+}
+
+describe('port availability', () => {
+  it('detects a real IPv4 wildcard listener', async () => {
+    const listener = await listen('0.0.0.0');
+
+    try {
+      assert.equal(await isPortAvailable(listener.address().port), false);
+    } finally {
+      await close(listener);
+    }
+  });
+
+  it('detects a real IPv4 loopback listener and releases every probe', async () => {
+    const listener = await listen();
+    const { port } = listener.address();
+
+    try {
+      assert.equal(await isPortAvailable(port), false);
+    } finally {
+      await close(listener);
+    }
+
+    assert.equal(await isPortAvailable(port), true);
+  });
+
+  it('detects a real IPv6 loopback listener when IPv6 is supported', async (t) => {
+    let listener;
+    try {
+      listener = await listen('::1');
+    } catch (error) {
+      if (error.code === 'EAFNOSUPPORT' || error.code === 'EADDRNOTAVAIL') {
+        t.skip(`IPv6 loopback is unavailable: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+
+    try {
+      assert.equal(await isPortAvailable(listener.address().port), false);
+    } finally {
+      await close(listener);
+    }
+  });
+
+  it('probes every bind shape and treats conflicts and denied binds as unavailable', async () => {
+    for (const code of ['EADDRINUSE', 'EACCES']) {
+      const mock = mockServerFactory({ '127.0.0.1': code });
+      assert.equal(await isPortAvailable(5100, mock), false);
+      assert.deepEqual(mock.listened, PORT_PROBE_HOSTS);
+      assert.equal(mock.closed.length, PORT_PROBE_HOSTS.length);
+    }
+  });
+
+  it('skips only unsupported IPv6 interfaces', async () => {
+    const mock = mockServerFactory({ '::': 'EAFNOSUPPORT', '::1': 'EADDRNOTAVAIL' });
+
+    assert.equal(await isPortAvailable(5100, mock), true);
+    assert.deepEqual(mock.listened, PORT_PROBE_HOSTS);
+    assert.equal(mock.closed.length, PORT_PROBE_HOSTS.length);
+  });
+
+  it('closes every probe and rejects unexpected socket errors', async () => {
+    const mock = mockServerFactory({ '127.0.0.1': 'EMFILE' });
+
+    await assert.rejects(isPortAvailable(5100, mock), { code: 'EMFILE' });
+    assert.deepEqual(mock.listened, PORT_PROBE_HOSTS);
+    assert.equal(mock.closed.length, PORT_PROBE_HOSTS.length);
+  });
+
+  it('skips occupied candidates when finding a port', async () => {
+    const checked = [];
+    const options = {
+      createServerFn() {
+        const server = new EventEmitter();
+        server.unref = () => {};
+        server.listen = ({ port }, callback) => {
+          checked.push(port);
+          queueMicrotask(() => {
+            if (port === 5100) {
+              server.emit('error', Object.assign(new Error('occupied'), { code: 'EADDRINUSE' }));
+            } else {
+              callback();
+            }
+          });
+        };
+        server.close = (callback) => queueMicrotask(() => callback());
+        return server;
+      },
+    };
+
+    assert.equal(await findFreePort(5100, 5101, options), 5101);
+    assert.ok(checked.includes(5100));
+    assert.ok(checked.includes(5101));
+  });
+});
+
+describe('interactive port selection', () => {
+  it('rejects occupied input and re-prompts until an available port is chosen', async () => {
+    const answers = ['5100', '5101'];
+    const questions = [];
+    const errors = [];
+
+    const chosen = await askPort('Server', 5199, {
+      askFn: async (question) => {
+        questions.push(question);
+        return answers.shift();
+      },
+      isPortAvailableFn: async (port) => port !== 5100,
+      reportError: (message) => errors.push(message),
+    });
+
+    assert.equal(chosen, 5101);
+    assert.equal(questions.length, 2);
+    assert.deepEqual(errors, ['Port 5100 is already in use or unavailable.']);
+  });
+});
+
+describe('--ensure config stability', () => {
+  it('skips an occupied candidate when config is missing', async () => {
+    const fixture = await createSetupFixture();
+    let listener;
+    try {
+      listener = await listen('127.0.0.1', 5100);
+    } catch (error) {
+      if (error.code !== 'EADDRINUSE' && error.code !== 'EACCES') throw error;
+    }
+
+    try {
+      await execFileAsync(process.execPath, [fixture.setupPath, '--ensure']);
+      const config = JSON.parse(
+        await readFile(join(fixture.directory, 'project.config.json'), 'utf8'),
+      );
+      assert.notEqual(config.serverPort, 5100);
+    } finally {
+      if (listener) await close(listener);
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it('does not rewrite occupied ports in an existing config', async () => {
+    const fixture = await createSetupFixture();
+    const config = { serverPort: 5100, dbPort: 5150, webPort: 5200 };
+    const listener = await listen();
+    config.serverPort = listener.address().port;
+    await writeFile(
+      join(fixture.directory, 'project.config.json'),
+      `${JSON.stringify(config, null, 2)}\n`,
+    );
+
+    try {
+      await execFileAsync(process.execPath, [fixture.setupPath, '--ensure']);
+      const persisted = JSON.parse(
+        await readFile(join(fixture.directory, 'project.config.json'), 'utf8'),
+      );
+      assert.deepEqual(persisted, config);
+    } finally {
+      await close(listener);
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('resolveManagedEnv', () => {
   it('keeps localhost defaults in sync with configured ports', () => {

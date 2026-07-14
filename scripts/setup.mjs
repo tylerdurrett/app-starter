@@ -8,12 +8,12 @@
  *   node scripts/setup.mjs --ensure   # non-interactive — reuse or auto-pick
  */
 
-import { createServer } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
+import { findFreePort, isPortAvailable } from './port-availability.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -32,26 +32,6 @@ const ensureMode = process.argv.includes('--ensure');
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Resolve true if the port is free, false otherwise. */
-function isPortFree(port) {
-  return new Promise((res) => {
-    const srv = createServer();
-    srv.unref();
-    srv.on('error', () => srv.close(() => res(false)));
-    srv.listen(port, '127.0.0.1', () => {
-      srv.close(() => res(true));
-    });
-  });
-}
-
-/** Find the first free port in [start, end]. Returns null if none available. */
-async function findFreePort(start, end) {
-  for (let port = start; port <= end; port++) {
-    if (await isPortFree(port)) return port;
-  }
-  return null;
-}
 
 /** Read an existing project.config.json, or null if missing / invalid. */
 function readConfig() {
@@ -199,14 +179,24 @@ function ask(question) {
 }
 
 /** Prompt for a port, validate, and return the chosen value. */
-async function askPort(label, defaultPort) {
-  const answer = await ask(`${label} port [${defaultPort}]: `);
-  const chosen = answer === '' ? defaultPort : parseInt(answer, 10);
-  if (Number.isNaN(chosen) || chosen < 1 || chosen > 65535) {
-    console.error(`Invalid port: "${answer}"`);
-    process.exit(1);
+export async function askPort(
+  label,
+  defaultPort,
+  { askFn = ask, isPortAvailableFn = isPortAvailable, reportError = console.error } = {},
+) {
+  while (true) {
+    const answer = await askFn(`${label} port [${defaultPort}]: `);
+    const chosen = answer === '' ? defaultPort : Number(answer);
+    if (!Number.isInteger(chosen) || chosen < 1 || chosen > 65535) {
+      reportError(`Invalid port: "${answer}"`);
+      continue;
+    }
+    if (!(await isPortAvailableFn(chosen))) {
+      reportError(`Port ${chosen} is already in use or unavailable.`);
+      continue;
+    }
+    return chosen;
   }
-  return chosen;
 }
 
 // ---------------------------------------------------------------------------
