@@ -20,8 +20,9 @@ import {
 } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   controlPaths,
@@ -85,12 +86,37 @@ function makeCliCheckout(parent, name, serverPort, webPort) {
   const checkoutRoot = join(parent, name);
   const scriptsDirectory = join(checkoutRoot, 'scripts');
   mkdirSync(scriptsDirectory, { recursive: true });
-  for (const script of ['dev-supervisor.mjs', 'compose.mjs', 'port-availability.mjs']) {
-    copyFileSync(new URL(script, import.meta.url), join(scriptsDirectory, script));
+  const pendingScripts = ['dev-supervisor.mjs'];
+  const databaseEnvironmentSource = new URL('database-env.mjs', import.meta.url);
+  if (existsSync(databaseEnvironmentSource)) {
+    pendingScripts.push('database-env.mjs');
+  }
+  const copiedScripts = new Set();
+  while (pendingScripts.length > 0) {
+    const script = pendingScripts.pop();
+    if (copiedScripts.has(script)) continue;
+    copiedScripts.add(script);
+    const source = new URL(script, import.meta.url);
+    const destination = join(scriptsDirectory, script);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyFileSync(source, destination);
+
+    const contents = readFileSync(source, 'utf8');
+    for (const match of contents.matchAll(/(?:from\s+|import\s*)['"](\.\/[^'"]+)['"]/g)) {
+      pendingScripts.push(match[1].slice(2));
+    }
+  }
+  if (existsSync(databaseEnvironmentSource)) {
+    assert.equal(existsSync(join(scriptsDirectory, 'database-env.mjs')), true);
   }
   writeFileSync(
     join(checkoutRoot, 'project.config.json'),
     `${JSON.stringify({ serverPort, webPort })}\n`,
+  );
+  symlinkSync(
+    fileURLToPath(new URL('../node_modules', import.meta.url)),
+    join(checkoutRoot, 'node_modules'),
+    'dir',
   );
   return checkoutRoot;
 }
@@ -223,7 +249,9 @@ describe('CLI checkout identity', { skip: unixOnly, concurrency: false }, () => 
       try {
         await waitUntil(() => existsSync(firstPaths.tokenPath), 3_000);
       } catch {
-        throw new Error(`Supervisor did not start: ${supervisorError.trim()}`);
+        throw new Error(
+          `Supervisor did not start with scripts [${readdirSync(join(first, 'scripts')).join(', ')}]: ${supervisorError.trim()}`,
+        );
       }
       const spoofedStop = spawnSync(process.execPath, [secondScript, 'stop'], {
         encoding: 'utf8',
@@ -247,10 +275,24 @@ describe('CLI checkout identity', { skip: unixOnly, concurrency: false }, () => 
       assert.deepEqual({ code, signal }, { code: 143, signal: null });
       assert.equal(existsSync(firstPaths.tokenPath), false);
     } finally {
-      if (supervisor.exitCode === null && supervisor.signalCode === null) {
-        const supervisorClosed = once(supervisor, 'close');
-        spawnSync(process.execPath, [firstScript, 'stop'], { encoding: 'utf8' });
-        await supervisorClosed;
+      try {
+        if (supervisor.exitCode === null && supervisor.signalCode === null) {
+          const supervisorClosed = once(supervisor, 'close');
+          const cleanupStop = spawnSync(process.execPath, [firstScript, 'stop'], {
+            encoding: 'utf8',
+          });
+          if (cleanupStop.status !== 0) supervisor.kill('SIGTERM');
+          const closed = await Promise.race([
+            supervisorClosed.then(() => true),
+            new Promise((resolvePromise) => setTimeout(() => resolvePromise(false), 2_000)),
+          ]);
+          if (!closed && supervisor.exitCode === null && supervisor.signalCode === null) {
+            supervisor.kill('SIGKILL');
+            await supervisorClosed;
+          }
+        }
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
       }
     }
   });
