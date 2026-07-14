@@ -21,13 +21,28 @@ describe('GET /health', () => {
   });
 
   it('returns 503 when DB probe fails', async () => {
+    const internalDetails = [
+      'db.internal.example',
+      'customer_production',
+      'SELECT private_value FROM internal_table',
+      'ECONNREFUSED',
+    ];
+    const internalMessage = internalDetails.join(' | ');
+    const logLines: string[] = [];
     const failingProbe: DbProbe = {
       ping: async () => {
-        throw new Error('connection refused');
+        throw new Error(internalMessage);
       },
     };
 
-    app = buildServer({ dbProbe: failingProbe });
+    app = buildServer({
+      dbProbe: failingProbe,
+      loggerStream: {
+        write: (msg) => {
+          logLines.push(msg);
+        },
+      },
+    });
     await app.ready();
 
     const res = await app.inject({ method: 'GET', url: '/health' });
@@ -36,7 +51,18 @@ describe('GET /health', () => {
     expect(res.json()).toEqual({
       status: 'error',
       db: 'disconnected',
-      error: 'connection refused',
+      error: 'Database unavailable',
     });
+
+    for (const detail of internalDetails) {
+      expect(res.body).not.toContain(detail);
+    }
+
+    const failureLog = logLines
+      .map((line) => JSON.parse(line) as { msg?: string; err?: { message?: string; stack?: string } })
+      .find((line) => line.msg === 'Database health probe failed');
+
+    expect(failureLog?.err?.message).toBe(internalMessage);
+    expect(failureLog?.err?.stack).toContain(internalMessage);
   });
 });
