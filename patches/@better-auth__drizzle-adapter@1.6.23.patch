@@ -1,0 +1,20 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 4d10917db6b87fe50b134cc5bd30e21ec570f759..811dc761704daeaeee366207ce71e21e0487c08e 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -552,7 +552,14 @@ const drizzleAdapter = (db, config) => {
+ 					return inTransaction ? mutateInTransaction(db) : db.transaction(mutateInTransaction);
+ 				}
+ 				if (!idColumn) return null;
+-				const targetIds = db.select({ id: idColumn }).from(schemaModel).where(...clause).limit(1);
++				let targetIds = db.select({ id: idColumn }).from(schemaModel).where(...clause).limit(1);
++				// PATCH(app-starter): lock the candidate row so the WHERE clause is
++				// re-evaluated after a concurrent writer commits. Without FOR UPDATE,
++				// Postgres READ COMMITTED re-checks only `id IN (<materialized ids>)`
++				// during EvalPlanQual, so two concurrent compare-and-set updates (e.g.
++				// oauth-provider refresh rotation, GHSA-392p-2q2v-4372) can BOTH win.
++				// Guarded: dialects without SELECT ... FOR UPDATE keep prior behavior.
++				if (typeof targetIds.for === "function") targetIds = targetIds.for("update");
+ 				return (await db.update(schemaModel).set(assignments).where(inArray(idColumn, targetIds)).returning())[0] ?? null;
+ 			},
+ 			options: config

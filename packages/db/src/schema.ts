@@ -186,7 +186,8 @@ export const oauthClients = pgTable('oauth_clients', {
 
 export const oauthRefreshTokens = pgTable('oauth_refresh_tokens', {
   id: text('id').primaryKey(),
-  token: text('token').notNull(),
+  // Unique per upstream 1.6.11 canonical schema (GHSA-392p-2q2v-4372 refresh-rotation race).
+  token: text('token').notNull().unique(),
   clientId: text('client_id').notNull().references(() => oauthClients.clientId),
   sessionId: text('session_id').references(() => sessions.id, { onDelete: 'set null' }),
   userId: text('user_id').notNull().references(() => users.id),
