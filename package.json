@@ -10,6 +10,7 @@
     "lint": "turbo run lint",
     "test": "turbo run test",
     "test:setup": "node --test scripts/setup.test.mjs",
+    "test:clean-clone-e2e": "node --test scripts/clean-clone-e2e.test.mjs && node scripts/clean-clone-e2e.mjs",
     "test:smoke-production": "node --test scripts/smoke-production.test.mjs",
     "smoke:production": "node scripts/smoke-production.mjs",
     "hello": "node scripts/setup.mjs",
