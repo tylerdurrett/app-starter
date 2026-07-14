@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import {
   chmodSync,
+  cpSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
+  rmSync,
   statSync,
   symlinkSync,
   unlinkSync,
@@ -119,6 +122,59 @@ describe('checkout control identity', { skip: unixOnly }, () => {
 
     await firstChannel.close();
   });
+
+  it('does not follow a copied public socket and token into another checkout', async () => {
+    const { parent, checkoutRoot: first, runtimeRoot } = temporaryCheckout('first');
+    const second = join(parent, 'second');
+    mkdirSync(second);
+    writeFileSync(
+      join(second, 'project.config.json'),
+      `${JSON.stringify({ serverPort: 41_003, webPort: 41_004 })}\n`,
+    );
+    const firstPaths = controlPaths(first, runtimeRoot);
+    const secondPaths = controlPaths(second, runtimeRoot);
+    let firstStops = 0;
+    const firstChannel = await createControlChannel(firstPaths, () => firstStops++);
+    mkdirSync(secondPaths.controlDirectory, { recursive: true });
+    copyFileSync(firstPaths.tokenPath, secondPaths.tokenPath);
+    symlinkSync(readlinkSync(firstPaths.socketPath), secondPaths.socketPath);
+
+    await assert.rejects(
+      stopSupervised({ checkoutRoot: second, runtimeRoot }),
+      /No managed development services/,
+    );
+    assert.equal(firstStops, 0);
+    assert.equal((await queryControl(firstPaths, 'status')).authenticated, true);
+
+    await firstChannel.close();
+  });
+
+  it('does not follow a copied owner lock and token into another checkout', async () => {
+    const { parent, checkoutRoot: first, runtimeRoot } = temporaryCheckout('first');
+    const second = join(parent, 'second');
+    mkdirSync(second);
+    writeFileSync(
+      join(second, 'project.config.json'),
+      `${JSON.stringify({ serverPort: 41_003, webPort: 41_004 })}\n`,
+    );
+    const firstPaths = controlPaths(first, runtimeRoot);
+    const secondPaths = controlPaths(second, runtimeRoot);
+    let firstStops = 0;
+    const firstChannel = await createControlChannel(firstPaths, () => firstStops++);
+    mkdirSync(secondPaths.controlDirectory, { recursive: true });
+    copyFileSync(firstPaths.tokenPath, secondPaths.tokenPath);
+    cpSync(firstPaths.lockDirectory, secondPaths.lockDirectory, { recursive: true });
+
+    await assert.rejects(
+      stopSupervised({ checkoutRoot: second, runtimeRoot }),
+      /No managed development services/,
+    );
+    assert.equal(firstStops, 0);
+    assert.equal((await queryControl(firstPaths, 'status')).authenticated, true);
+
+    rmSync(secondPaths.controlDirectory, { recursive: true, force: true });
+    await firstChannel.close();
+  });
 });
 
 describe('safe control state handling', { skip: unixOnly }, () => {
@@ -140,7 +196,9 @@ describe('safe control state handling', { skip: unixOnly }, () => {
     const { checkoutRoot, runtimeRoot } = temporaryCheckout();
     const paths = controlPaths(checkoutRoot, runtimeRoot);
     mkdirSync(paths.lockDirectory, { recursive: true });
-    writeFileSync(join(paths.lockDirectory, 'owner'), `${'a'.repeat(64)}\n`, { mode: 0o600 });
+    writeFileSync(join(paths.lockDirectory, 'owner'), `${paths.checkoutHash}.${'a'.repeat(64)}\n`, {
+      mode: 0o600,
+    });
     writeFileSync(paths.tokenPath, `${'b'.repeat(64)}\n`, { mode: 0o600 });
     writeFileSync(paths.socketPath, 'stale socket placeholder');
     const old = new Date(Date.now() - 10_000);

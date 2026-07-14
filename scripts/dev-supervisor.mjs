@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -38,6 +38,7 @@ const LOCK_STALE_MS = 2_000;
 const LOCK_HEARTBEAT_MS = 250;
 const LOCK_RECLAIM_CONFIRM_MS = 300;
 const GROUP_EXIT_POLL_MS = 10;
+const CONTROL_PROTOCOL_VERSION = 1;
 
 function ignoreMissing(path) {
   try {
@@ -164,12 +165,21 @@ function socketLinkOwned(paths, ownedSocketPath) {
 }
 
 function ownedSocketPath(paths, owner) {
-  const candidate = join(paths.controlDirectory, `socket-${owner.slice(0, 12)}.sock`);
+  const ownerHash = createHash('sha256').update(owner).digest('hex').slice(0, 12);
+  const candidate = join(paths.controlDirectory, `socket-${ownerHash}.sock`);
   if (Buffer.byteLength(candidate) < MAX_UNIX_SOCKET_PATH_BYTES) return candidate;
   const addressHash = createHash('sha256').update(paths.socketPath).digest('hex').slice(0, 10);
   return join(
     CONTROL_ROOT,
-    `as-own-${paths.checkoutHash}-${addressHash}-${owner.slice(0, 8)}.sock`,
+    `as-own-${paths.checkoutHash}-${addressHash}-${ownerHash.slice(0, 8)}.sock`,
+  );
+}
+
+function validLockOwner(paths, owner) {
+  return (
+    typeof owner === 'string' &&
+    owner.startsWith(`${paths.checkoutHash}.`) &&
+    TOKEN_PATTERN.test(owner.slice(paths.checkoutHash.length + 1))
   );
 }
 
@@ -216,7 +226,7 @@ function lockIsStale(snapshot, now = Date.now()) {
 
 function tryAcquireControlLock(paths) {
   ensureControlDirectory(paths);
-  const owner = randomBytes(TOKEN_BYTES).toString('hex');
+  const owner = `${paths.checkoutHash}.${randomBytes(TOKEN_BYTES).toString('hex')}`;
   let directoryCreated = false;
   try {
     mkdirSync(paths.lockDirectory, { mode: 0o700 });
@@ -255,7 +265,13 @@ function wait(milliseconds) {
 }
 
 async function queryPrivateControl(paths, snapshot, command, options) {
-  if (!snapshot?.privateSocket) return null;
+  if (
+    !snapshot?.privateSocket ||
+    !validLockOwner(paths, snapshot.owner) ||
+    snapshot.privateSocket !== ownedSocketPath(paths, snapshot.owner)
+  ) {
+    return null;
+  }
   return queryControl({ ...paths, socketPath: snapshot.privateSocket }, command, options);
 }
 
@@ -303,16 +319,55 @@ function tokensMatch(actual, expected) {
   );
 }
 
+function requestAuthenticator(token, checkoutHash, command, nonce) {
+  return createHmac('sha256', token)
+    .update(`request\0${CONTROL_PROTOCOL_VERSION}\0${checkoutHash}\0${command}\0${nonce}`)
+    .digest('hex');
+}
+
+function responseAuthenticator(token, checkoutHash, command, nonce, status) {
+  return createHmac('sha256', token)
+    .update(
+      `response\0${CONTROL_PROTOCOL_VERSION}\0${checkoutHash}\0${command}\0${nonce}\0${status}`,
+    )
+    .digest('hex');
+}
+
+function publicSocketLinkIsValid(paths) {
+  let stat;
+  try {
+    stat = lstatSync(paths.socketPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') return true;
+    throw error;
+  }
+  if (!stat.isSymbolicLink()) return true;
+  const owner = readLockOwner(paths);
+  return (
+    validLockOwner(paths, owner) && readlinkSync(paths.socketPath) === ownedSocketPath(paths, owner)
+  );
+}
+
 /**
  * Query the checkout's control address. A connected but unauthenticated socket
  * is deliberately reported as live so callers never remove another listener.
  */
 export function queryControl(paths, command, { timeoutMs = CONTROL_TIMEOUT_MS } = {}) {
   return new Promise((resolvePromise, reject) => {
+    if (!publicSocketLinkIsValid(paths)) {
+      resolvePromise({
+        listener: false,
+        authenticated: false,
+        reason: 'control socket does not belong to this checkout',
+      });
+      return;
+    }
     const socket = createConnection(paths.socketPath);
     let connected = false;
     let settled = false;
     let response = '';
+    let token = null;
+    const nonce = randomBytes(16).toString('hex');
 
     const finish = (result, error) => {
       if (settled) return;
@@ -325,14 +380,22 @@ export function queryControl(paths, command, { timeoutMs = CONTROL_TIMEOUT_MS } 
     socket.setTimeout(timeoutMs);
     socket.once('connect', () => {
       connected = true;
-      let token = null;
       try {
         token = readControlToken(paths.tokenPath);
       } catch (error) {
         finish({ listener: true, authenticated: false, reason: error.message });
         return;
       }
-      socket.write(`${JSON.stringify({ command, token })}\n`);
+      const auth = token ? requestAuthenticator(token, paths.checkoutHash, command, nonce) : null;
+      socket.write(
+        `${JSON.stringify({
+          version: CONTROL_PROTOCOL_VERSION,
+          checkoutHash: paths.checkoutHash,
+          command,
+          nonce,
+          auth,
+        })}\n`,
+      );
     });
     socket.on('data', (chunk) => {
       response += chunk;
@@ -344,10 +407,22 @@ export function queryControl(paths, command, { timeoutMs = CONTROL_TIMEOUT_MS } 
       if (newline === -1) return;
       try {
         const parsed = JSON.parse(response.slice(0, newline));
+        const expectedAuth =
+          token && typeof parsed.status === 'string'
+            ? responseAuthenticator(token, paths.checkoutHash, command, nonce, parsed.status)
+            : null;
+        const identityMatches =
+          parsed.version === CONTROL_PROTOCOL_VERSION &&
+          parsed.checkoutHash === paths.checkoutHash &&
+          parsed.nonce === nonce &&
+          tokensMatch(parsed.auth, expectedAuth);
         finish({
           listener: true,
-          authenticated: parsed.ok === true,
-          reason: parsed.error,
+          authenticated: parsed.ok === true && identityMatches,
+          reason:
+            parsed.ok === true && !identityMatches
+              ? 'control response identity mismatch'
+              : parsed.error,
           response: parsed,
         });
       } catch {
@@ -496,6 +571,14 @@ export async function createControlChannel(paths, onStop) {
   let tokenPublished = false;
   let tokenIdentity;
   let heartbeat;
+  const successResponse = (command, nonce, status) => ({
+    ok: true,
+    version: CONTROL_PROTOCOL_VERSION,
+    checkoutHash: paths.checkoutHash,
+    nonce,
+    status,
+    auth: responseAuthenticator(token, paths.checkoutHash, command, nonce, status),
+  });
   const server = createServer((socket) => {
     connections.add(socket);
     socket.once('close', () => connections.delete(socket));
@@ -516,25 +599,36 @@ export async function createControlChannel(paths, onStop) {
         if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
           throw new Error('invalid request');
         }
-        if (!tokensMatch(parsed.token, token)) {
+        const validEnvelope =
+          parsed.version === CONTROL_PROTOCOL_VERSION &&
+          parsed.checkoutHash === paths.checkoutHash &&
+          (parsed.command === 'status' || parsed.command === 'stop') &&
+          typeof parsed.nonce === 'string' &&
+          /^[a-f0-9]{32}$/.test(parsed.nonce);
+        const expectedAuth = validEnvelope
+          ? requestAuthenticator(token, paths.checkoutHash, parsed.command, parsed.nonce)
+          : null;
+        if (!validEnvelope || !tokensMatch(parsed.auth, expectedAuth)) {
           socket.end(`${JSON.stringify({ ok: false, error: 'authentication failed' })}\n`);
           return;
         }
         if (parsed.command === 'status') {
-          socket.end(`${JSON.stringify({ ok: true, status: 'running' })}\n`);
+          socket.end(`${JSON.stringify(successResponse('status', parsed.nonce, 'running'))}\n`);
           return;
         }
         if (parsed.command === 'stop') {
-          socket.end(`${JSON.stringify({ ok: true, status: 'stopping' })}\n`, () => {
-            try {
-              onStop();
-            } catch (error) {
-              console.error(error);
-            }
-          });
+          socket.end(
+            `${JSON.stringify(successResponse('stop', parsed.nonce, 'stopping'))}\n`,
+            () => {
+              try {
+                onStop();
+              } catch (error) {
+                console.error(error);
+              }
+            },
+          );
           return;
         }
-        socket.end(`${JSON.stringify({ ok: false, error: 'unknown command' })}\n`);
       } catch {
         if (!socket.destroyed) {
           socket.end(`${JSON.stringify({ ok: false, error: 'invalid request' })}\n`);
@@ -802,7 +896,7 @@ export async function stopSupervised({
       }.`,
     );
   }
-  return result.response;
+  return { ok: true, status: result.response.status };
 }
 
 function parseCli(argv) {
