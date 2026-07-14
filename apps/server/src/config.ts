@@ -53,8 +53,8 @@ const TRUST_PROXY_ALIASES = new Set(['loopback', 'linklocal', 'uniquelocal']);
 const TRUST_PROXY_ERROR =
   'TRUST_PROXY must be "false", a canonical positive integer, or a comma-separated list of IP addresses, CIDR ranges, and supported aliases (loopback, linklocal, uniquelocal)';
 
-function isCanonicalNonNegativeInteger(value: string): boolean {
-  return /^(0|[1-9]\d*)$/.test(value) && Number.isSafeInteger(Number(value));
+function isCanonicalPositiveInteger(value: string): boolean {
+  return /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value));
 }
 
 function isValidProxyAddress(value: string): boolean {
@@ -65,7 +65,7 @@ function isValidProxyAddress(value: string): boolean {
   const address = value.slice(0, slashIndex);
   const prefix = value.slice(slashIndex + 1);
   const family = isIP(address);
-  if (family === 0 || !isCanonicalNonNegativeInteger(prefix)) return false;
+  if (family === 0 || !isCanonicalPositiveInteger(prefix)) return false;
 
   return Number(prefix) <= (family === 4 ? 32 : 128);
 }

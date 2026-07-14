@@ -16,8 +16,8 @@ validated at startup:
 | `loopback`, `linklocal`, `uniquelocal`            | Trust Fastify's supported local-network ranges.    |
 
 `true`, zero or negative hop counts, hostnames, unknown aliases, malformed
-addresses/ranges, and lists with empty entries are rejected. Restart the server
-after changing the value.
+addresses/ranges, `/0` ranges unsupported by Fastify's proxy matcher, and lists
+with empty entries are rejected. Restart the server after changing the value.
 
 ## How the boundary works
 

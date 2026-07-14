@@ -173,8 +173,10 @@ describe('server config', () => {
     ['hostname', 'proxy.example.com'],
     ['malformed IPv4', '203.0.113.256'],
     ['malformed IPv4 CIDR', '10.0.0.0/33'],
+    ['zero-prefix IPv4 CIDR', '0.0.0.0/0'],
     ['noncanonical CIDR prefix', '10.0.0.0/08'],
     ['malformed IPv6 CIDR', 'fd00::/129'],
+    ['zero-prefix IPv6 CIDR', '::/0'],
   ])('rejects invalid TRUST_PROXY input: %s', async (_name, value) => {
     setEnv({ TRUST_PROXY: value });
 
