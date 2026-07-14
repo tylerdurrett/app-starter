@@ -15,6 +15,13 @@
       "when": 1783690964541,
       "tag": "0001_aspiring_spot",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783996992902,
+      "tag": "0002_condemned_clea",
+      "breakpoints": true
     }
   ]
 }
