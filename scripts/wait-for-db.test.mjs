@@ -11,6 +11,8 @@ import { composeProjectName } from './compose.mjs';
 import { resolveDatabaseEnvironment } from './database-env.mjs';
 import {
   assertOwnedHealthyContainer,
+  findPostgresContainer,
+  inspectContainer,
   waitForComposeDatabase,
   waitForDatabase,
   waitForExternalDatabase,
@@ -105,6 +107,77 @@ describe('Compose database readiness', () => {
       }),
       /did not create a Postgres service container/,
     );
+  });
+
+  it('queries only the checkout-scoped Postgres service container', async () => {
+    const env = { DB_PORT: '6150' };
+    const calls = [];
+    const containerId = await findPostgresContainer(
+      { checkoutRoot: repoRoot, env },
+      async (command, args, options) => {
+        calls.push({ command, args, options });
+        return 'owned-container\n';
+      },
+    );
+
+    assert.equal(containerId, 'owned-container');
+    assert.deepEqual(calls, [
+      {
+        command: 'docker',
+        args: [
+          'compose',
+          '--project-name',
+          composeProjectName(repoRoot),
+          'ps',
+          '--all',
+          '--quiet',
+          'postgres',
+        ],
+        options: { cwd: repoRoot, env },
+      },
+    ]);
+  });
+
+  it('rejects missing or ambiguous Compose service container output', async () => {
+    for (const [output, pattern] of [
+      ['', /did not create a Postgres service container/],
+      ['first\nsecond\n', /Expected one Postgres service container.*found 2/],
+    ]) {
+      await assert.rejects(
+        findPostgresContainer({}, async () => output),
+        pattern,
+      );
+    }
+  });
+
+  it('inspects the selected container and requires one valid Docker result', async () => {
+    const inspection = healthyInspection();
+    const calls = [];
+    assert.deepEqual(
+      await inspectContainer('owned-container', async (command, args, options) => {
+        calls.push({ command, args, options });
+        return JSON.stringify([inspection]);
+      }),
+      inspection,
+    );
+    assert.deepEqual(calls, [
+      {
+        command: 'docker',
+        args: ['inspect', 'owned-container'],
+        options: { cwd: repoRoot, env: process.env },
+      },
+    ]);
+
+    for (const [output, pattern] of [
+      ['not-json', /invalid container inspection data/],
+      ['[]', /exactly one container inspection/],
+      ['[{}, {}]', /exactly one container inspection/],
+    ]) {
+      await assert.rejects(
+        inspectContainer('owned-container', async () => output),
+        pattern,
+      );
+    }
   });
 
   it('requires matching project and service ownership labels', () => {
@@ -213,6 +286,40 @@ describe('external database readiness', () => {
         new RegExp(`External Postgres is reachable on 127\\.0\\.0\\.1:${port}`),
       );
       assert.doesNotMatch(result.stdout, /secret/);
+    } finally {
+      server.close();
+      await once(server, 'close');
+    }
+  });
+
+  it('connects to an explicit IPv6 literal without URL brackets', async (context) => {
+    const server = createServer((socket) => socket.end());
+    try {
+      server.listen(0, '::1');
+      await once(server, 'listening');
+    } catch (error) {
+      if (error.code === 'EADDRNOTAVAIL' || error.code === 'EAFNOSUPPORT') {
+        context.skip('IPv6 loopback is unavailable');
+        return;
+      }
+      throw error;
+    }
+    const { port } = server.address();
+
+    try {
+      const result = await execFileAsync(process.execPath, ['scripts/wait-for-db.mjs'], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          DATABASE_MODE: 'external',
+          DATABASE_URL: `postgresql://user:secret@[::1]:${port}/app`,
+        },
+      });
+      assert.match(
+        result.stdout,
+        new RegExp(`External Postgres is reachable on \\[::1\\]:${port}`),
+      );
+      assert.doesNotMatch(result.stdout, /secret|\[\[::1\]\]/);
     } finally {
       server.close();
       await once(server, 'close');

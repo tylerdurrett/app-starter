@@ -14,7 +14,13 @@ const TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 1_000;
 
 function endpoint(hostname, port) {
-  return `${hostname.includes(':') ? `[${hostname}]` : hostname}:${port}`;
+  const normalizedHostname = normalizeHostname(hostname);
+  return `${normalizedHostname.includes(':') ? `[${normalizedHostname}]` : normalizedHostname}:${port}`;
+}
+
+function normalizeHostname(hostname) {
+  if (hostname.startsWith('[') && hostname.endsWith(']')) return hostname.slice(1, -1);
+  return hostname;
 }
 
 function sleep(ms) {
@@ -24,7 +30,7 @@ function sleep(ms) {
 /** Test whether a TCP endpoint accepts a connection within the supplied bound. */
 export function isReachable(hostname, port, timeoutMs = POLL_INTERVAL_MS) {
   return new Promise((resolvePromise) => {
-    const socket = createConnection({ host: hostname, port });
+    const socket = createConnection({ host: normalizeHostname(hostname), port });
     let settled = false;
 
     function finish(reachable) {
@@ -177,14 +183,13 @@ export async function waitForExternalDatabase(
   } = {},
 ) {
   const startedAt = now();
+  const hostname = normalizeHostname(resolved.hostname);
   const address = endpoint(resolved.hostname, resolved.port);
 
   while (now() - startedAt < timeoutMs) {
     const elapsed = now() - startedAt;
     const remaining = timeoutMs - elapsed;
-    if (
-      await checkReachable(resolved.hostname, resolved.port, Math.min(pollIntervalMs, remaining))
-    ) {
+    if (await checkReachable(hostname, resolved.port, Math.min(pollIntervalMs, remaining))) {
       console.log(`External Postgres is reachable on ${address}.`);
       return;
     }
