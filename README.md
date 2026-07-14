@@ -18,6 +18,10 @@ pnpm go        # start Postgres, run migrations, launch server + web
 - `pnpm stop` stops server + web; Postgres keeps running.
 
 Ports live in `project.config.json` (defaults may differ — `pnpm hello` sets them).
+By default, this checkout starts and migrates its own Docker Compose Postgres.
+To use an existing database instead, set both `DATABASE_MODE=external` and a
+valid PostgreSQL `DATABASE_URL` in `.env`; setting `DATABASE_URL` alone does not
+disable the checkout-owned database.
 
 ## What's inside
 

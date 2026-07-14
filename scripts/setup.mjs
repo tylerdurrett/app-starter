@@ -13,6 +13,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
+import { parseEnvironmentFile, resolveDatabaseEnvironment } from './database-env.mjs';
 import { findFreePort, isPortAvailable } from './port-availability.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -62,17 +63,7 @@ function writeConfig(serverPort, dbPort, webPort) {
 /** Read existing .env file and parse into key-value pairs */
 function readEnvFile() {
   try {
-    const content = readFileSync(envPath, 'utf-8');
-    const env = {};
-    for (const line of content.split('\n')) {
-      if (line.trim() && !line.startsWith('#')) {
-        const [key, ...valueParts] = line.split('=');
-        if (key) {
-          env[key.trim()] = valueParts.join('=').trim();
-        }
-      }
-    }
-    return env;
+    return parseEnvironmentFile(readFileSync(envPath));
   } catch {
     return {};
   }
@@ -105,6 +96,11 @@ function isLocalDevUrl(value, path = '/') {
 
 /** Upsert .env values - preserve existing, update/add generated ones */
 export function resolveManagedEnv(existing, { dbPort, webPort, serverPort }) {
+  const database = resolveDatabaseEnvironment({
+    config: { dbPort },
+    fileEnv: existing,
+    inheritedEnv: {},
+  });
   const localAuthUrl = `http://localhost:${serverPort}`;
   const localWebUrl = `http://localhost:${webPort}`;
   const authUrl =
@@ -126,7 +122,8 @@ export function resolveManagedEnv(existing, { dbPort, webPort, serverPort }) {
 
   return {
     DB_PORT: String(dbPort),
-    DATABASE_URL: `postgresql://postgres:postgres@127.0.0.1:${dbPort}/postgres`,
+    DATABASE_MODE: database.mode,
+    DATABASE_URL: database.databaseUrl,
     // Preserve custom HTTPS origins used by Tailscale Serve or production-like
     // local testing. Overwriting them during `pnpm go` breaks CORS/cookie auth.
     CORS_ORIGIN: webUrl,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, it } from 'node:test';
 import { findFreePort, isPortAvailable, PORT_PROBE_HOSTS } from './port-availability.mjs';
+import { parseEnvironmentFile } from './database-env.mjs';
 import { askPort, resolveManagedEnv } from './setup.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -66,6 +67,10 @@ async function createSetupFixture() {
     readFile(new URL('./port-availability.mjs', import.meta.url)).then((contents) =>
       writeFile(join(scriptsDirectory, 'port-availability.mjs'), contents),
     ),
+    readFile(new URL('./database-env.mjs', import.meta.url)).then((contents) =>
+      writeFile(join(scriptsDirectory, 'database-env.mjs'), contents),
+    ),
+    symlink(new URL('../node_modules', import.meta.url), join(directory, 'node_modules'), 'dir'),
   ]);
   return { directory, setupPath: join(scriptsDirectory, 'setup.mjs') };
 }
@@ -229,6 +234,53 @@ describe('--ensure config stability', () => {
       await rm(fixture.directory, { recursive: true, force: true });
     }
   });
+
+  it('writes compose mode and the configured local URL over a custom URL', async () => {
+    const fixture = await createSetupFixture();
+    const config = { serverPort: 6100, dbPort: 6150, webPort: 6200 };
+    await writeFile(
+      join(fixture.directory, 'project.config.json'),
+      `${JSON.stringify(config, null, 2)}\n`,
+    );
+    await writeFile(
+      join(fixture.directory, '.env'),
+      'DATABASE_URL=postgresql://another-project.example.com/app\n',
+    );
+
+    try {
+      await execFileAsync(process.execPath, [fixture.setupPath, '--ensure']);
+      const env = parseEnvironmentFile(await readFile(join(fixture.directory, '.env')));
+      assert.equal(env.DATABASE_MODE, 'compose');
+      assert.equal(env.DB_PORT, '6150');
+      assert.equal(env.DATABASE_URL, 'postgresql://postgres:postgres@127.0.0.1:6150/postgres');
+    } finally {
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves a valid URL from an explicitly external .env', async () => {
+    const fixture = await createSetupFixture();
+    const config = { serverPort: 6100, dbPort: 6150, webPort: 6200 };
+    const databaseUrl = 'postgresql://user:secret@database.example.com:6543/app';
+    await writeFile(
+      join(fixture.directory, 'project.config.json'),
+      `${JSON.stringify(config, null, 2)}\n`,
+    );
+    await writeFile(
+      join(fixture.directory, '.env'),
+      `DATABASE_MODE=external\nDATABASE_URL=${databaseUrl}\n`,
+    );
+
+    try {
+      await execFileAsync(process.execPath, [fixture.setupPath, '--ensure']);
+      const env = parseEnvironmentFile(await readFile(join(fixture.directory, '.env')));
+      assert.equal(env.DATABASE_MODE, 'external');
+      assert.equal(env.DB_PORT, '6150');
+      assert.equal(env.DATABASE_URL, databaseUrl);
+    } finally {
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('resolveManagedEnv', () => {
@@ -249,6 +301,8 @@ describe('resolveManagedEnv', () => {
     assert.equal(env.BETTER_AUTH_URL, 'http://localhost:6100');
     assert.equal(env.MCP_CANONICAL_URL, 'http://localhost:6100/mcp');
     assert.equal(env.AUTH_REQUIRE_EMAIL_VERIFICATION, 'true');
+    assert.equal(env.DATABASE_MODE, 'compose');
+    assert.equal(env.DATABASE_URL, 'postgresql://postgres:postgres@127.0.0.1:6150/postgres');
   });
 
   it('preserves production-like HTTPS origins across pnpm go', () => {
@@ -267,5 +321,39 @@ describe('resolveManagedEnv', () => {
     assert.equal(env.BETTER_AUTH_URL, 'https://api.example.com');
     assert.equal(env.MCP_CANONICAL_URL, 'https://api.example.com/mcp');
     assert.equal(env.AUTH_REQUIRE_EMAIL_VERIFICATION, 'false');
+  });
+
+  it('replaces a custom URL unless external mode is explicit', () => {
+    const env = resolveManagedEnv(
+      { DATABASE_URL: 'postgresql://another-project.example.com/app' },
+      { dbPort: 5150, webPort: 5200, serverPort: 5100 },
+    );
+
+    assert.equal(env.DATABASE_MODE, 'compose');
+    assert.equal(env.DATABASE_URL, 'postgresql://postgres:postgres@127.0.0.1:5150/postgres');
+  });
+
+  it('preserves a valid URL only in explicit external mode', () => {
+    const databaseUrl = 'postgresql://user:secret@database.example.com:6543/app';
+    const env = resolveManagedEnv(
+      { DATABASE_MODE: 'external', DATABASE_URL: databaseUrl },
+      { dbPort: 5150, webPort: 5200, serverPort: 5100 },
+    );
+
+    assert.equal(env.DATABASE_MODE, 'external');
+    assert.equal(env.DATABASE_URL, databaseUrl);
+    assert.equal(env.DB_PORT, '5150');
+  });
+
+  it('rejects invalid modes and invalid external URLs', () => {
+    const ports = { dbPort: 5150, webPort: 5200, serverPort: 5100 };
+    assert.throws(
+      () => resolveManagedEnv({ DATABASE_MODE: 'local' }, ports),
+      /Invalid DATABASE_MODE/,
+    );
+    assert.throws(
+      () => resolveManagedEnv({ DATABASE_MODE: 'external', DATABASE_URL: 'not-a-url' }, ports),
+      /valid PostgreSQL URL/,
+    );
   });
 });

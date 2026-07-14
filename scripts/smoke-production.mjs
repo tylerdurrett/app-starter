@@ -6,6 +6,9 @@ import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { resolveDatabaseEnvironment } from './database-env.mjs';
+import { runDatabaseMigration } from './run-db-migrate.mjs';
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 const START_TIMEOUT_MS = 15_000;
@@ -22,22 +25,24 @@ export function readProjectConfig(path = resolve(repoRoot, 'project.config.json'
   return config;
 }
 
-export function createSmokeEnvironment(config, inherited = process.env) {
-  const env = {
-    ...inherited,
-    NODE_ENV: 'test',
-    PORT: String(config.serverPort),
-    DB_PORT: String(config.dbPort),
-    DATABASE_URL: `postgresql://postgres:postgres@127.0.0.1:${config.dbPort}/postgres`,
-    BETTER_AUTH_URL: `http://127.0.0.1:${config.serverPort}`,
-    CORS_ORIGIN: `http://127.0.0.1:${config.webPort}`,
-    MCP_CANONICAL_URL: `http://127.0.0.1:${config.serverPort}/mcp`,
-    BETTER_AUTH_SECRET: 'production-smoke-secret-at-least-32-characters',
-    CREDENTIAL_ENCRYPTION_KEY: '00'.repeat(32),
-    AUTH_REQUIRE_EMAIL_VERIFICATION: 'false',
-  };
-  delete env.NODE_OPTIONS;
-  return env;
+export function createSmokeEnvironment(config, inherited = process.env, fileEnv) {
+  const cleanInherited = { ...inherited };
+  delete cleanInherited.NODE_OPTIONS;
+  return resolveDatabaseEnvironment({
+    config,
+    fileEnv,
+    inheritedEnv: cleanInherited,
+    childEnvOverrides: {
+      NODE_ENV: 'test',
+      PORT: String(config.serverPort),
+      BETTER_AUTH_URL: `http://127.0.0.1:${config.serverPort}`,
+      CORS_ORIGIN: `http://127.0.0.1:${config.webPort}`,
+      MCP_CANONICAL_URL: `http://127.0.0.1:${config.serverPort}/mcp`,
+      BETTER_AUTH_SECRET: 'production-smoke-secret-at-least-32-characters',
+      CREDENTIAL_ENCRYPTION_KEY: '00'.repeat(32),
+      AUTH_REQUIRE_EMAIL_VERIFICATION: 'false',
+    },
+  });
 }
 
 export function assertPortAvailable(port) {
@@ -47,7 +52,9 @@ export function assertPortAvailable(port) {
     guard.once('error', (error) => {
       reject(
         error.code === 'EADDRINUSE'
-          ? new Error(`Configured server port ${port} is already in use; refusing to test another process`)
+          ? new Error(
+              `Configured server port ${port} is already in use; refusing to test another process`,
+            )
           : error,
       );
     });
@@ -63,14 +70,14 @@ export function run(command, args, env) {
     child.once('error', reject);
     child.once('exit', (code, signal) => {
       if (code === 0) resolvePromise();
-      else reject(new Error(`${command} ${args.join(' ')} exited with ${signal ?? `code ${code}`}`));
+      else
+        reject(new Error(`${command} ${args.join(' ')} exited with ${signal ?? `code ${code}`}`));
     });
   });
 }
 
-export async function runPrerequisites(env, runCommand = run) {
-  await runCommand(process.execPath, ['scripts/wait-for-db.mjs'], env);
-  await runCommand(pnpm, ['db:migrate'], env);
+export async function runPrerequisites(database, runCommand = run) {
+  await runDatabaseMigration(database, runCommand);
 }
 
 export function captureChildOutput(child, output = process.stdout, errorOutput = process.stderr) {
@@ -107,15 +114,26 @@ export async function waitForChildListen(child, port, getLogs, timeoutMs = START
     const onData = () => {
       if (getLogs().includes(expected)) finish(resolvePromise);
     };
-    const onError = (error) => finish(() => reject(childFailure(`Compiled server failed: ${error.message}`, getLogs)));
+    const onError = (error) =>
+      finish(() => reject(childFailure(`Compiled server failed: ${error.message}`, getLogs)));
     const onExit = (code, signal) =>
       finish(() =>
-        reject(childFailure(`Compiled server exited before its listen signal (${signal ?? code})`, getLogs)),
+        reject(
+          childFailure(
+            `Compiled server exited before its listen signal (${signal ?? code})`,
+            getLogs,
+          ),
+        ),
       );
     const timer = setTimeout(
       () =>
         finish(() =>
-          reject(childFailure(`Compiled server did not emit its listen signal within ${timeoutMs}ms`, getLogs)),
+          reject(
+            childFailure(
+              `Compiled server did not emit its listen signal within ${timeoutMs}ms`,
+              getLogs,
+            ),
+          ),
         ),
       timeoutMs,
     );
@@ -207,11 +225,12 @@ export function installSignalHandlers(child, stop = stopChild, processLike = pro
 
 export async function main() {
   const config = readProjectConfig();
-  const env = createSmokeEnvironment(config);
+  const database = createSmokeEnvironment(config);
+  const { childEnv: env } = database;
   const healthUrl = `http://127.0.0.1:${config.serverPort}/health`;
 
   await assertPortAvailable(config.serverPort);
-  await runPrerequisites(env);
+  await runPrerequisites(database);
 
   for (const output of [
     'packages/db/dist',
@@ -247,7 +266,10 @@ export async function main() {
     });
   }
   if (primaryError && cleanupError) {
-    throw new AggregateError([primaryError, cleanupError], 'Smoke failed and server cleanup also failed');
+    throw new AggregateError(
+      [primaryError, cleanupError],
+      'Smoke failed and server cleanup also failed',
+    );
   }
   if (primaryError) throw primaryError;
   if (cleanupError) throw cleanupError;

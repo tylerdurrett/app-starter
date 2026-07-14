@@ -27,7 +27,7 @@ function fakeChild() {
 }
 
 test('smoke environment overrides inherited resolution and database settings', () => {
-  const env = createSmokeEnvironment(
+  const database = createSmokeEnvironment(
     { serverPort: 6100, dbPort: 6150, webPort: 6200 },
     {
       NODE_OPTIONS: '--conditions=development --trace-warnings',
@@ -37,20 +37,28 @@ test('smoke environment overrides inherited resolution and database settings', (
       DATABASE_URL: 'postgresql://wrong',
       UNRELATED: 'preserved',
     },
+    {},
   );
+  const { childEnv: env } = database;
 
   assert.equal(env.NODE_OPTIONS, undefined);
   assert.equal(env.NODE_ENV, 'test');
   assert.equal(env.PORT, '6100');
   assert.equal(env.DB_PORT, '6150');
   assert.equal(env.DATABASE_URL, 'postgresql://postgres:postgres@127.0.0.1:6150/postgres');
+  assert.equal(env.DATABASE_MODE, 'compose');
   assert.equal(env.UNRELATED, 'preserved');
 });
 
 test('database readiness and migration use the same explicit environment in order', async () => {
-  const env = { DB_PORT: '6150', DATABASE_URL: 'postgresql://explicit', NODE_ENV: 'test' };
+  const database = createSmokeEnvironment(
+    { serverPort: 6100, dbPort: 6150, webPort: 6200 },
+    {},
+    {},
+  );
+  const { childEnv: env } = database;
   const calls = [];
-  await runPrerequisites(env, async (command, args, receivedEnv) => {
+  await runPrerequisites(database, async (command, args, receivedEnv) => {
     calls.push({ command, args, env: receivedEnv });
   });
 
@@ -58,11 +66,25 @@ test('database readiness and migration use the same explicit environment in orde
     { command: process.execPath, args: ['scripts/wait-for-db.mjs'], env },
     {
       command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm',
-      args: ['db:migrate'],
+      args: ['exec', 'drizzle-kit', 'migrate'],
       env,
     },
   ]);
   assert.equal(calls[0].env, calls[1].env);
+});
+
+test('smoke preserves an explicitly configured external database for every child', () => {
+  const databaseUrl = 'postgresql://user:secret@database.example.com:6543/app';
+  const database = createSmokeEnvironment(
+    { serverPort: 6100, dbPort: 6150, webPort: 6200 },
+    { DATABASE_MODE: 'external', DATABASE_URL: databaseUrl },
+    {},
+  );
+
+  assert.equal(database.mode, 'external');
+  assert.equal(database.databaseUrl, databaseUrl);
+  assert.equal(database.childEnv.DATABASE_URL, databaseUrl);
+  assert.equal(database.childEnv.DB_PORT, '6543');
 });
 
 test('port guard refuses to run when the configured server port is occupied', async (t) => {
