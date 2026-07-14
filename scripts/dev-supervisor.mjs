@@ -11,6 +11,7 @@ import {
   openSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -21,7 +22,7 @@ import {
 } from 'node:fs';
 import { createServer, createConnection } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 import { canonicalCheckoutRoot } from './compose.mjs';
 import { isPortAvailable } from './port-availability.mjs';
@@ -39,6 +40,12 @@ const LOCK_HEARTBEAT_MS = 250;
 const LOCK_RECLAIM_CONFIRM_MS = 300;
 const GROUP_EXIT_POLL_MS = 10;
 const CONTROL_PROTOCOL_VERSION = 1;
+const IDENTITY_ENVIRONMENT_KEYS = [
+  'APP_STARTER_CHECKOUT_ROOT',
+  'APP_STARTER_RUNTIME_ROOT',
+  'APP_STARTER_DEV_RUNTIME_ROOT',
+  'APP_STARTER_DEV_RUNTIME_DIR',
+];
 
 function ignoreMissing(path) {
   try {
@@ -46,6 +53,12 @@ function ignoreMissing(path) {
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
+}
+
+function sanitizedChildEnvironment(env) {
+  const sanitized = { ...env };
+  for (const key of IDENTITY_ENVIRONMENT_KEYS) delete sanitized[key];
+  return sanitized;
 }
 
 /** Derive a short Unix control address from the canonical checkout path. */
@@ -836,7 +849,7 @@ export async function startSupervised(
   try {
     child = spawnCommand(command, args, {
       cwd: paths.canonicalRoot,
-      env,
+      env: sanitizedChildEnvironment(env),
       stdio,
       detached: true,
     });
@@ -912,8 +925,10 @@ function parseCli(argv) {
 
 export async function main(argv = process.argv.slice(2)) {
   const cli = parseCli(argv);
-  const checkoutRoot = process.env.APP_STARTER_CHECKOUT_ROOT || scriptRoot;
-  const runtimeRoot = process.env.APP_STARTER_DEV_RUNTIME_ROOT || CONTROL_ROOT;
+  // Checkout identity is code location, never inherited process state. This is
+  // what prevents a command launched in checkout B from controlling checkout A.
+  const checkoutRoot = scriptRoot;
+  const runtimeRoot = CONTROL_ROOT;
 
   if (cli.subcommand === 'preflight') await preflight({ checkoutRoot, runtimeRoot });
   else if (cli.subcommand === 'stop') await stopSupervised({ checkoutRoot, runtimeRoot });
@@ -924,7 +939,10 @@ export async function main(argv = process.argv.slice(2)) {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+const isMainModule =
+  process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+
+if (isMainModule) {
   main().catch((error) => {
     console.error(error.message);
     process.exitCode = 1;

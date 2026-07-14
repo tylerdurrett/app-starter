@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
 import {
   chmodSync,
@@ -7,6 +8,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   rmSync,
@@ -69,6 +71,28 @@ async function closeServer(server) {
   await new Promise((resolvePromise, reject) => {
     server.close((error) => (error ? reject(error) : resolvePromise()));
   });
+}
+
+async function availablePort() {
+  const server = createServer();
+  await listen(server, { host: '127.0.0.1', port: 0 });
+  const port = server.address().port;
+  await closeServer(server);
+  return port;
+}
+
+function makeCliCheckout(parent, name, serverPort, webPort) {
+  const checkoutRoot = join(parent, name);
+  const scriptsDirectory = join(checkoutRoot, 'scripts');
+  mkdirSync(scriptsDirectory, { recursive: true });
+  for (const script of ['dev-supervisor.mjs', 'compose.mjs', 'port-availability.mjs']) {
+    copyFileSync(new URL(script, import.meta.url), join(scriptsDirectory, script));
+  }
+  writeFileSync(
+    join(checkoutRoot, 'project.config.json'),
+    `${JSON.stringify({ serverPort, webPort })}\n`,
+  );
+  return checkoutRoot;
 }
 
 async function rawControlRequest(socketPath, request) {
@@ -174,6 +198,61 @@ describe('checkout control identity', { skip: unixOnly }, () => {
 
     rmSync(secondPaths.controlDirectory, { recursive: true, force: true });
     await firstChannel.close();
+  });
+});
+
+describe('CLI checkout identity', { skip: unixOnly, concurrency: false }, () => {
+  it('ignores inherited checkout and runtime overrides from another checkout', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'app-starter-supervisor-cli-'));
+    const first = makeCliCheckout(parent, 'first', await availablePort(), await availablePort());
+    const second = makeCliCheckout(parent, 'second', await availablePort(), await availablePort());
+    const firstScript = join(first, 'scripts', 'dev-supervisor.mjs');
+    const secondScript = join(second, 'scripts', 'dev-supervisor.mjs');
+    const spoofedRuntime = join(parent, 'spoofed-runtime');
+    mkdirSync(spoofedRuntime);
+    const firstPaths = controlPaths(first);
+    const supervisor = spawn(
+      process.execPath,
+      [firstScript, 'start', '--', process.execPath, '-e', 'setInterval(() => {}, 1000)'],
+      { stdio: ['ignore', 'ignore', 'pipe'] },
+    );
+    let supervisorError = '';
+    supervisor.stderr.on('data', (chunk) => (supervisorError += chunk));
+
+    try {
+      try {
+        await waitUntil(() => existsSync(firstPaths.tokenPath), 3_000);
+      } catch {
+        throw new Error(`Supervisor did not start: ${supervisorError.trim()}`);
+      }
+      const spoofedStop = spawnSync(process.execPath, [secondScript, 'stop'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          APP_STARTER_CHECKOUT_ROOT: first,
+          APP_STARTER_RUNTIME_ROOT: spoofedRuntime,
+          APP_STARTER_DEV_RUNTIME_ROOT: spoofedRuntime,
+        },
+      });
+
+      assert.equal(spoofedStop.status, 1);
+      assert.match(spoofedStop.stderr, /No managed development services/);
+      assert.equal((await queryControl(firstPaths, 'status')).authenticated, true);
+      assert.deepEqual(readdirSync(spoofedRuntime), []);
+
+      const supervisorClosed = once(supervisor, 'close');
+      const realStop = spawnSync(process.execPath, [firstScript, 'stop'], { encoding: 'utf8' });
+      assert.equal(realStop.status, 0, realStop.stderr);
+      const [code, signal] = await supervisorClosed;
+      assert.deepEqual({ code, signal }, { code: 143, signal: null });
+      assert.equal(existsSync(firstPaths.tokenPath), false);
+    } finally {
+      if (supervisor.exitCode === null && supervisor.signalCode === null) {
+        const supervisorClosed = once(supervisor, 'close');
+        spawnSync(process.execPath, [firstScript, 'stop'], { encoding: 'utf8' });
+        await supervisorClosed;
+      }
+    }
   });
 });
 
@@ -393,10 +472,18 @@ describe('owned process-group supervision', { skip: unixOnly, concurrency: false
     const { checkoutRoot, runtimeRoot } = temporaryCheckout();
     const child = mockChild();
     const signals = [];
+    const childEnv = {
+      PATH: '/safe-bin',
+      APP_STARTER_CHECKOUT_ROOT: '/spoofed-checkout',
+      APP_STARTER_RUNTIME_ROOT: '/spoofed-runtime',
+      APP_STARTER_DEV_RUNTIME_ROOT: '/spoofed-dev-runtime',
+      APP_STARTER_DEV_RUNTIME_DIR: '/spoofed-dev-runtime-dir',
+    };
     let spawnOptions;
     const running = startSupervised('turbo', ['run', 'dev'], {
       checkoutRoot,
       runtimeRoot,
+      env: childEnv,
       checkPort: async () => true,
       installSignalHandlers: false,
       spawnCommand(_command, _args, options) {
@@ -419,6 +506,7 @@ describe('owned process-group supervision', { skip: unixOnly, concurrency: false
     assert.deepEqual(await running, { code: 0, signal: null });
     assert.equal(spawnOptions.detached, true);
     assert.equal(spawnOptions.cwd, paths.canonicalRoot);
+    assert.deepEqual(spawnOptions.env, { PATH: '/safe-bin' });
     assert.deepEqual(signals, [[-child.pid, 'SIGTERM']]);
   });
 
